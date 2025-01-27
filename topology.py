@@ -1,4 +1,9 @@
 from mininet.topo import Topo
+from mininet.net import Mininet
+from mininet.node import RemoteController, OVSKernelSwitch
+from mininet.cli import CLI
+from mininet.log import setLogLevel
+import json
 
 class MyTopo(Topo):
     def __init__(self):
@@ -12,10 +17,10 @@ class MyTopo(Topo):
         h4 = self.addHost('h4')
 
         # Add switches
-        s1 = self.addSwitch('s1', protocols='OpenFlow13')
-        s2 = self.addSwitch('s2', protocols='OpenFlow13')
-        s3 = self.addSwitch('s3', protocols='OpenFlow13')
-        s4 = self.addSwitch('s4', protocols='OpenFlow13')
+        s1 = self.addSwitch('s1', cls=OVSKernelSwitch, protocols='OpenFlow13')
+        s2 = self.addSwitch('s2',cls=OVSKernelSwitch, protocols='OpenFlow13')
+        s3 = self.addSwitch('s3',cls=OVSKernelSwitch, protocols='OpenFlow13')
+        s4 = self.addSwitch('s4', cls=OVSKernelSwitch, protocols='OpenFlow13')
 
         # Add links with bandwidth capacities
         self.addLink(h1, s1)
@@ -30,5 +35,44 @@ class MyTopo(Topo):
         self.addLink(s2, s3, bw=10)
         self.addLink(s1, s4, bw=20)
 
-# Make the topology available to Mininet
-topos = {'mytopo': (lambda: MyTopo())}
+
+def save_host_macs(net):
+    """
+    Collects and saves the MAC addresses of the hosts in a JSON file.
+    """
+    host_macs = {}
+
+    for host in net.hosts:
+        mac = host.MAC()
+        host_macs[host.name] = mac
+
+    with open("/tmp/host_macs.json", "w") as f:
+        json.dump(host_macs, f, indent=4)
+
+    print("MAC addresses saved to /tmp/host_macs.json")
+
+
+def run_topology():
+    # Sets the log level
+    setLogLevel('info')
+
+    # Create the network with the remote controller
+    
+    net = Mininet(topo=MyTopo(), controller=lambda name: RemoteController(name, ip='127.0.0.1', port=6653))
+
+    # Start the network
+    net.start()
+
+    # Save the MAC addresses of the hosts
+    save_host_macs(net)
+
+
+    # Open the Mininet CLI for manual interaction
+    CLI(net)
+
+    # Stops the network when the CLI is closed
+    net.stop()
+
+
+if __name__ == '__main__':
+    run_topology()

@@ -1,40 +1,71 @@
-- To ssh to the VM: (password: vagrant)
-  ```
-    ssh -X -p 2222 vagrant@localhost
-  ```
-- The file **topology.py** defines the topology network presented in the project pdf.
+# NGN Newtork slicing exam
 
-To run the topology in mininet:
-  ```
-    sudo mn --custom topology.py --topo mytopo --controller=remote,ip=127.0.0.1,port=6653
-  ```
+## Instruction and file description
 
-- The file **allocator_flow.py** has the logic of the controller. To run it:
-  ```
-  cd /home/vagrant/comnetsemu_dependencies/ryu-v4.34/ryu/ryu/app
-  ryu-manager --ofp-tcp-listen-port 6653 flow_allocater_controller.py
-  ```
+To ssh to the VM: (password: vagrant)
 
-- The file **flow_allocator_handler_REST.py** provides a REST API interface for interacting with the Ryu controller managing network flows in it. 
+```
+  ssh -X -p 2222 vagrant@localhost
+```
+
+---
+
+### Topology
+
+The file **topology.py** defines the topology network presented in the project pdf.
+
+To run the topology in mininet, from the root folder:
+
+```
+  sudo python3 topology.py
+```
+
+---
+
+### Controller
+
+The file **flow_allocator_controller.py** is the controller of the network. To run it from the root folder use the shell script:
+
+```
+sudo ./start_controller.sh
+```
+
+---
+
+### REST Interface
+
+The file **flow_allocator_handler_REST.py** provides a REST API interface for interacting with the Ryu controller managing network flows in it.
+
 To request the allocation of the flow between the hosts we call the POST method defined in this file and it will trigger the controller.
-  ```
-   curl -X POST -H "Content-Type: application/json" -d '{"src": "a6:0c:58:e9:86:2d", "dst": "e2:8d:18:27:c8:87", "bandwidth": 8}' http://127.0.0.1:8080/allocate_flow
-  ```
 
--The file **path_finder.py** defines a class that determines the path between the hosts that meets the specified bandwidth.
+#### Automatic
 
-**Steps to run the project and see what it does:**
+Run the python script that reads from a dump file from the mininet topology the generated MAC adresses of the hosts and let's you just choose the host name (eg. requests a flow from h1 to h2).
 
-  1/ In one terminal you ssh to the VM and run :
-  
-          sudo mn --custom topology.py --topo mytopo --controller=remote,ip=127.0.0.1,port=6653
-  
-  2/ In onther terminal you ssh to the VM and run : 
-  
-          cd /home/vagrant/comnetsemu_dependencies/ryu-v4.34/ryu/ryu/app
-          ryu-manager --ofp-tcp-listen-port 6653 flow_allocater_controller.py
-          
-  3/ In onther terminal you ssh to the VM and run: (change the src_mac and dest_mac with the ones specified in the mininet cli) :
-  
-         curl -X POST -H "Content-Type: application/json" -d '{"src": "a6:0c:58:e9:86:2d", "dst": "e2:8d:18:27:c8:87", "bandwidth": 8}' http://127.0.0.1:8080/allocate_flow
-  
+From the root folder run:
+
+```
+  sudo python3 tester.py
+```
+
+#### Manual
+
+From a terminal run:
+
+```
+ curl -X POST -H "Content-Type: application/json" -d '{"src": "<source_host>", "dst": "<destination_host>", "bandwidth": <requested_bandwidth>}' http://127.0.0.1:8080/allocate_flow
+```
+
+Where you can specify desired src, dst and bandwidth.
+
+---
+
+### Path finder
+
+The file **path_finder.py** defines a class that determines the path between the hosts that meets the specified bandwidth.
+
+## Note:
+
+**For each step you'll need to open a new terminal connected to the VM. So at least 3 shells.**
+
+All set :smile:
