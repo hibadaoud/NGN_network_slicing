@@ -209,7 +209,7 @@ class FlowAllocator(app_manager.RyuApp):
                 "dst_hw_addr": link.dst.hw_addr,
             }
     
-    def allocate_flow(self, src_mac, dst_mac, bandwidth):
+    def allocate_flow(self, src_mac, src_switch, src_port, dst_mac, bandwidth):
         """
         Allocates a flow from src_mac to dst_mac. If MAC addresses are unknown,
         it triggers the learning process and retries automatically.
@@ -226,7 +226,8 @@ class FlowAllocator(app_manager.RyuApp):
 
             # Triggera il processo di apprendimento
             self.logger.warning(f"Attempt {attempt + 1}/{max_retries}: Learning MAC addresses...")
-            self.trigger_packet_in_for_learning(src_mac, dst_mac)
+            # self.trigger_packet_in_for_learning(src_mac, src_switch, src_port, dst_mac)
+            self.trigger_packet_in(src_switch, src_port, src_mac, dst_mac)
 
             # Attendi che il learning sia completato
             self.logger.info(f"Waiting for MAC learning...")
@@ -259,12 +260,17 @@ class FlowAllocator(app_manager.RyuApp):
             self.flow_capacity[reverse_link] -= bandwidth
             self.path_finder.link_capacities[link] = self.flow_capacity[link]
             self.path_finder.link_capacities[reverse_link] = self.flow_capacity[reverse_link]
+        
+        self.path_finder.build_graph()  # Rebuild the graph
+
+        
+        # Ottieni src_port e dst_port dai dizionari
+        src_port = self.host_to_switch[src_mac]['port']
+        dst_port = self.host_to_switch[dst_mac]['port']
 
         # Installa le regole di flusso
-        for i in range(len(path) - 1):
-            src_switch = path[i]
-            dst_switch = path[i + 1]
-            self.install_flow(src_switch, dst_switch, src_mac, dst_mac)
+        self.install_path_flows(path, src_mac, dst_mac, src_port, dst_port)
+        self.install_path_flows(path[::-1], dst_mac, src_mac, dst_port, src_port)
         
         self.logger.info(f"Flow successfully allocated from {src_mac} to {dst_mac}.")
         return True
@@ -283,22 +289,32 @@ class FlowAllocator(app_manager.RyuApp):
             datapath = self.get_datapath(path[i])
             parser = datapath.ofproto_parser
             ofproto = datapath.ofproto
+            
 
-            if i == 0:
-                # First switch: match src_mac and forward to the next switch
-                out_port = self.links[(path[i], path[i + 1])]["src_port"]
-                match = parser.OFPMatch(eth_src=src_mac, eth_dst=dst_mac)
-            elif i == len(path) - 1:
-                # Last switch: forward to destination port
-                out_port = dst_port
-                match = parser.OFPMatch(eth_src=src_mac, eth_dst=dst_mac)
-            else:
-                # Intermediate switches
-                out_port = self.links[(path[i], path[i + 1])]["src_port"]
-                match = parser.OFPMatch(eth_src=src_mac, eth_dst=dst_mac)
+            try:
+                if i == 0:
+                    self.logger.info(f"First switch: {path[i]} -> {path[i + 1]}")
+                    # First switch: match src_mac and forward to the next switch
+                    out_port = self.links[(path[i], path[i + 1])]["src_port"]
+                    match = parser.OFPMatch(eth_src=src_mac, eth_dst=dst_mac, in_port=src_port)
+                elif i == len(path) - 1:
+                    self.logger.info(f"Last switch: {path[i]} -> host B")
+                    # Last switch: forward to destination port
+                    out_port = dst_port
+                    match = parser.OFPMatch(eth_src=src_mac, eth_dst=dst_mac)
+                else:
+                    self.logger.info(f"Intermediate switch: {path[i]} -> {path[i + 1]}")
+                    # Intermediate switches
+                    out_port = self.links[(path[i], path[i + 1])]["src_port"]
+                    match = parser.OFPMatch(eth_src=src_mac, eth_dst=dst_mac)
 
-            actions = [parser.OFPActionOutput(out_port)]
-            self.add_flow(datapath, 1, match, actions)
+                # Azioni di uscita
+                actions = [parser.OFPActionOutput(out_port)]
+                self.add_flow(datapath, 1, match, actions)
+
+            except KeyError:
+                self.logger.error(f"Link not found: {path[i]} -> {path[i + 1]}")
+                return
 
         self.logger.info(f"Flow rules installed along path: {path}")
 
@@ -328,64 +344,64 @@ class FlowAllocator(app_manager.RyuApp):
         
         return self.datapaths[switch_id]
 
-    def trigger_packet_in(self, switch_id, src_mac, dst_mac):
+    def trigger_packet_in(self, src_switch, src_port, src_mac, dst_mac):
         """
         Triggers ARP learning by flooding a broadcast or directed packet.
         Args:
-            switch_id (int): Switch ID.
+            src_switch (int): Source switch ID.
+            src_port (int): Source port number.
             src_mac (str): Source MAC address.
-            dst_mac (str): Destination MAC address (optional).
+            dst_mac (str): Destination MAC address.
         """
-        if switch_id not in self.datapaths:
-            self.logger.error(f"Datapath {switch_id} not found.")
+        if src_switch not in self.datapaths:
+            self.logger.error(f"Datapath {src_switch} not found.")
             return
 
-        datapath = self.datapaths[switch_id]
+        datapath = self.datapaths[src_switch]
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
 
-        # Creare un pacchetto Ethernet generico
+        # Create a synthetic packet
+        
         pkt = packet.Packet()
-        eth_hdr = ethernet.ethernet(
-            ethertype=ether_types.ETH_TYPE_IP,  # Può essere un qualsiasi tipo valido
-            src=src_mac,  # MAC sorgente
-            dst=dst_mac  # MAC di destinazione
-        )
-        pkt.add_protocol(eth_hdr)
+        pkt.add_protocol(ethernet.ethernet(ethertype=ether_types.ETH_TYPE_IP,
+                           src=src_mac, dst=dst_mac))
+        pkt.add_protocol(b'Packet triggered from allocator')  # Add custom message to the payload
         pkt.serialize()
 
-        # Invia il pacchetto tramite flooding
-        actions = [parser.OFPActionOutput(ofproto.OFPP_FLOOD)]
-        out = parser.OFPPacketOut(
-            datapath=datapath,
-            buffer_id=ofproto.OFP_NO_BUFFER,
-            in_port=ofproto.OFPP_CONTROLLER,
-            actions=actions,
-            data=pkt.data,
-        )
-        datapath.send_msg(out)
-        self.logger.info(f"Flooding packet from {src_mac} to {dst_mac or 'broadcast'} on switch {switch_id}")
+          # Simulate Packet-In message
+        msg = parser.OFPPacketIn(datapath=datapath,
+                                buffer_id=ofproto.OFP_NO_BUFFER,
+                                total_len=len(pkt.data),
+                                reason=ofproto.OFPR_NO_MATCH,
+                                table_id=0,
+                                cookie=0,
+                                match=parser.OFPMatch(in_port=src_port),
+                                data=pkt.data)
+        # Manually invoke the packet_in_handler
+        self.packet_in_handler(type("Event", (object,), {"msg": msg}))
+        self.logger.info(f"Simulated Packet-In: {src_mac} -> {dst_mac} on Switch {src_switch}, Port {src_port}")
 
 
-    def trigger_packet_in_for_learning(self, src_mac, dst_mac):
-        """
-        Sends packets for MAC learning using flooding.
-        """
-        for switch_id, datapath in self.datapaths.items():
-            # Se entrambi i MAC sono sconosciuti, invia due pacchetti in broadcast
-            if src_mac not in self.host_to_switch and dst_mac not in self.host_to_switch:
-                self.trigger_packet_in(switch_id, src_mac, dst_mac)  # Broadcast from src_mac
-                #self.trigger_packet_in(switch_id, dst_mac, src_mac)  # Broadcast from dst_mac
-                # self.logger.info(f"Flooded broadcast packets from {src_mac} and {dst_mac} on switch {switch_id}")
+    # def trigger_packet_in_for_learning(self, src_mac, src_switch, src_port, dst_mac):
+    #     """
+    #     Sends packets for MAC learning using flooding.
+    #     """
+    #     for switch_id, datapath in self.datapaths.items():
+    #         # Se entrambi i MAC sono sconosciuti, invia due pacchetti in broadcast
+    #         if src_mac not in self.host_to_switch and dst_mac not in self.host_to_switch:
+    #             self.trigger_packet_in(switch_id, src_mac, src_port, dst_mac)  # Broadcast from src_mac
+    #             #self.trigger_packet_in(switch_id, dst_mac, src_mac)  # Broadcast from dst_mac
+    #             # self.logger.info(f"Flooded broadcast packets from {src_mac} and {dst_mac} on switch {switch_id}")
 
-            # Se conosci solo uno dei due MAC
-            elif src_mac not in self.host_to_switch:
-                self.trigger_packet_in(switch_id, src_mac, dst_mac)
-                self.logger.info(f"Sent learning packet: {src_mac} -> {dst_mac} via Switch {switch_id}")
+    #         # Se conosci solo uno dei due MAC
+    #         elif src_mac not in self.host_to_switch:
+    #             self.trigger_packet_in(switch_id, src_mac, src_port, dst_mac)
+    #             self.logger.info(f"Sent learning packet: {src_mac} -> {dst_mac} via Switch {switch_id}")
 
-            elif dst_mac not in self.host_to_switch:
-                self.trigger_packet_in(switch_id, dst_mac, src_mac)
-                self.logger.info(f"Sent learning packet: {dst_mac} -> {src_mac} via Switch {switch_id}")
+    #         elif dst_mac not in self.host_to_switch:
+    #             self.trigger_packet_in(switch_id, src_mac, src_port, dst_mac)
+    #             self.logger.info(f"Sent learning packet: {dst_mac} -> {src_mac} via Switch {switch_id}")
 
 
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
@@ -460,8 +476,13 @@ class FlowAllocator(app_manager.RyuApp):
         #     self.add_flow(dp, 1, match, actions)
 
         # Invia il pacchetto al destinatario o effettua flood
-        data = msg.data if msg.buffer_id == ofproto.OFP_NO_BUFFER else None
+        payload = b"Forwarded from controller"
+        data = msg.data + payload if msg.buffer_id == ofproto.OFP_NO_BUFFER else None
+        # data = msg.data if msg.buffer_id == ofproto.OFP_NO_BUFFER else None
+        
         out = parser.OFPPacketOut(
             datapath=dp, buffer_id=msg.buffer_id, in_port=in_port, actions=actions, data=data
         )
         dp.send_msg(out)
+        
+        pprint(self.host_to_switch)

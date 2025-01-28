@@ -36,20 +36,33 @@ class MyTopo(Topo):
         self.addLink(s1, s4, bw=20)
 
 
-def save_host_macs(net):
+def save_host_info(net):
     """
-    Collects and saves the MAC addresses of the hosts in a JSON file.
+    Collects and saves the MAC addresses and connected ports of the hosts in a JSON file.
     """
-    host_macs = {}
+    host_info = {}
 
     for host in net.hosts:
         mac = host.MAC()
-        host_macs[host.name] = mac
+        # Get the link information for the host
+        intf = host.intfList()[0]  # Assuming the host has only one interface
+        link = intf.link
+        if link:
+            # Get the connected switch and port number
+            connected_switch = int(link.intf2.node.name.split("s")[-1])
+            connected_port = link.intf2.name.split("-")[-1]
+            connected_port = int(connected_port.split("eth")[-1])
 
-    with open("/tmp/host_macs.json", "w") as f:
-        json.dump(host_macs, f, indent=4)
+            host_info[host.name] = {
+                "mac": mac,
+                "connected_switch": connected_switch,  # Name of the connected switch
+                "src_port": connected_port,  # Port number on the switch
+            }
 
-    print("MAC addresses saved to /tmp/host_macs.json")
+    with open("/tmp/host_info.json", "w") as f:
+        json.dump(host_info, f, indent=4)
+
+    print("Host info (MAC and port) saved to /tmp/host_info.json")
 
 
 def run_topology():
@@ -64,7 +77,7 @@ def run_topology():
     net.start()
 
     # Save the MAC addresses of the hosts
-    save_host_macs(net)
+    save_host_info(net)
 
 
     # Open the Mininet CLI for manual interaction

@@ -9,7 +9,7 @@ class PathFinder:
         """
         self.link_capacities = link_capacities
         self.logger = logger
-        self.graph = self.build_graph()
+        self.build_graph()
 
     def build_graph(self):
         """
@@ -22,21 +22,25 @@ class PathFinder:
                 graph[u] = {}
             graph[u][v] = capacity
         self.logger.info(f"Graph structure: {graph}")
-        return graph
+        self.graph = graph
 
     def find_max_bandwidth_path(self, src, dst, required_bandwidth):
         """
         Finds a path with sufficient bandwidth between src and dst.
 
-        :param src: Source node (switch).
-        :param dst: Destination node (switch).
+        :param src: Source node (switch ID).
+        :param dst: Destination node (switch ID).
         :param required_bandwidth: The required bandwidth for the path.
         :return: Tuple (path, bandwidth), or (None, 0) if no path exists.
         """
         self.logger.info(f"Finding path: src={src}, dst={dst}, required_bandwidth={required_bandwidth}")
 
+        # Use src["dpid"] and dst["dpid"] as identifiers
+        src_dpid = src['dpid']
+        dst_dpid = dst['dpid']
+
         # Priority queue for maximum bandwidth path search
-        pq = [(-float('inf'), src, [])]  # (-bandwidth, current_node, path)
+        pq = [(-float('inf'), src_dpid, [])]  # (-bandwidth, current_node, path)
         visited = set()
 
         while pq:
@@ -49,10 +53,10 @@ class PathFinder:
             visited.add(node)
 
             # If destination is reached, return the path and bottleneck bandwidth
-            if node == dst:
+            if node == dst_dpid:
                 if bandwidth >= required_bandwidth:
-                    self.logger.info(f"Path found: {path + [dst]}, bandwidth: {bandwidth}")
-                    return path + [dst], bandwidth
+                    self.logger.info(f"Path found: {path + [dst_dpid]}, bandwidth: {bandwidth}")
+                    return path + [dst_dpid], bandwidth
 
             # Evaluate neighbors
             for neighbor, capacity in self.graph.get(node, {}).items():

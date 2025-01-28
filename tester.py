@@ -10,7 +10,7 @@ def get_mininet_macs():
     """
     Reads MAC addresses from a pre-generated file by Mininet.
     """
-    mac_file = "/tmp/host_macs.json"
+    mac_file = "/tmp/host_info.json"
 
     if not os.path.exists(mac_file):
         print("MAC address file not found. Ensure Mininet is running and generating the file.")
@@ -48,21 +48,24 @@ def select_hosts(hosts_mac):
             print("Error: Source and destination hosts must be different.")
             return None, None
 
-        src_mac = host_list[src_index][1]
-        dst_mac = host_list[dst_index][1]
-        return src_mac, dst_mac
+        src = host_list[src_index][1]
+        dst = host_list[dst_index][1]
+        
+        return src, dst
     except (ValueError, IndexError):
         print("Invalid selection.")
         return None, None
 
 
-def send_curl_request(src_mac, dst_mac, bandwidth=8):
+def send_curl_request(src, dst, bandwidth=8):
     """
     Sends a curl request to the REST controller to allocate the flow.
     """
     data = {
-        "src": src_mac,
-        "dst": dst_mac,
+        "src": src['mac'],
+        "src_switch": src['connected_switch'],
+        "src_port": src['src_port'],
+        "dst": dst['mac'],
         "bandwidth": bandwidth
     }
 
@@ -93,10 +96,10 @@ def main():
         print("No MAC addresses found. Ensure Mininet is running.")
         return
 
-    src_mac, dst_mac = select_hosts(hosts_mac)
+    src, dst = select_hosts(hosts_mac)
 
-    if src_mac and dst_mac:
-        send_curl_request(src_mac, dst_mac)
+    if src and dst:
+        send_curl_request(src, dst)
 
 
 if __name__ == "__main__":
