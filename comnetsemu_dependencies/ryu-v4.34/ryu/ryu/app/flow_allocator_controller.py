@@ -1,7 +1,7 @@
 import logging
 from ryu.base import app_manager
 from ryu.controller import ofp_event
-from ryu.controller.handler import MAIN_DISPATCHER, DEAD_DISPATCHER, set_ev_cls
+from ryu.controller.handler import MAIN_DISPATCHER, DEAD_DISPATCHER, CONFIG_DISPATCHER, set_ev_cls
 from ryu.ofproto import ofproto_v1_3
 from ryu.lib.packet import packet, ethernet, ether_types, arp, ipv4, ipv6
 from ryu.topology import event
@@ -11,9 +11,13 @@ from flow_allocator_handler_REST import FlowRequestHandler
 import heapq
 from path_finder import PathFinder
 from time import sleep
+import time
+import threading
+
 
 from pprint import pprint
 
+PACKET_TIMEOUT = 5  # Timeout in seconds for duplicate packet detection
 
 # Link dictionary
 # links = {
@@ -109,7 +113,26 @@ class FlowAllocator(app_manager.RyuApp):
 
         self.path_finder = PathFinder(self.flow_capacity, self.logger)
         
-        # self.switches = {} 
+        self.processed_packets = {}
+        
+        # Start a thread to clean up processed packets
+        threading.Thread(target=self.cleanup_processed_packets, daemon=True).start()
+        
+        # self.switches = {}
+        
+    
+    def cleanup_processed_packets(self):
+        """
+        Thread that periodically cleans up the set of processed packets.
+        """
+        while True:
+            current_time = time.time()
+            # Remove packets older than the timeout
+            self.processed_packets = {
+                k: v for k, v in self.processed_packets.items() if current_time - v < PACKET_TIMEOUT
+            }
+            self.logger.info(f"Cleaned up processed packets. Remaining: {len(self.processed_packets)}")
+            time.sleep(PACKET_TIMEOUT)  # wait for the timeout period
 
     @set_ev_cls(ofp_event.EventOFPStateChange, [MAIN_DISPATCHER, DEAD_DISPATCHER])
     def state_change_handler(self, ev):
@@ -122,7 +145,7 @@ class FlowAllocator(app_manager.RyuApp):
             self.datapaths.pop(datapath.id, None)  # Remove datapath
             self.logger.info(f"Switch disconnected: dpid={datapath.id}")
 
-    @set_ev_cls(ofp_event.EventOFPSwitchFeatures, MAIN_DISPATCHER)
+    @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
         datapath = ev.msg.datapath
         dpid = datapath.id  # Datapath ID of the switch
@@ -147,13 +170,13 @@ class FlowAllocator(app_manager.RyuApp):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
         dpid = datapath.id
-        self.logger.info(f"datapath.id={datapath.id}")
+        # self.logger.info(f"datapath.id={datapath.id}")
         # Create flow mod message
         inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
         mod = parser.OFPFlowMod(
             datapath=datapath, priority=priority, match=match, instructions=inst
         )
-        self.logger.debug(f"Flow added: match={match}, actions={actions}")
+        self.logger.debug(f"Adding flow: match={match}, actions={actions}")
         datapath.send_msg(mod)
         self.logger.info(f"Flow added successfully.")
         
@@ -215,8 +238,8 @@ class FlowAllocator(app_manager.RyuApp):
         it triggers the learning process and retries automatically.
         """
         # max_retries = 5
-        max_retries = 1
-        retry_interval = 1  # Tempo in secondi tra i tentativi
+        max_retries = 3
+        retry_interval = 3  # Tempo in secondi tra i tentativi
 
         for attempt in range(max_retries):
             if src_mac in self.host_to_switch and dst_mac in self.host_to_switch:
@@ -289,7 +312,6 @@ class FlowAllocator(app_manager.RyuApp):
             datapath = self.get_datapath(path[i])
             parser = datapath.ofproto_parser
             ofproto = datapath.ofproto
-            
 
             try:
                 if i == 0:
@@ -361,13 +383,38 @@ class FlowAllocator(app_manager.RyuApp):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
 
+
+        pkt = packet.Packet()
+        pkt.add_protocol(ethernet.ethernet(
+            ethertype=ether_types.ETH_TYPE_ARP,
+            src=src_mac,
+            dst="ff:ff:ff:ff:ff:ff"  # Broadcast
+        ))
+        pkt.add_protocol(arp.arp(
+            opcode=arp.ARP_REQUEST,
+            src_mac=src_mac,
+            src_ip="10.0.0.1",  # Fake IP
+            dst_mac=dst_mac,
+            dst_ip="10.0.0.2"  # Fake Destination IP
+        ))
+        pkt.serialize()
+
+        # actions = [parser.OFPActionOutput(ofproto.OFPP_FLOOD)]
+        # out = parser.OFPPacketOut(
+        #     datapath=datapath, buffer_id=ofproto.OFP_NO_BUFFER,
+        #     in_port=src_port, actions=actions, data=pkt.data
+        # )
+        # datapath.send_msg(out)
+        
+        # self.logger.info(f"Simulated Packet-In: {src_mac} -> {dst_mac} on Switch {src_switch}, Port {src_port}")
+
         # Create a synthetic packet
         
-        pkt = packet.Packet()
-        pkt.add_protocol(ethernet.ethernet(ethertype=ether_types.ETH_TYPE_IP,
-                           src=src_mac, dst=dst_mac))
-        pkt.add_protocol(b'Packet triggered from allocator')  # Add custom message to the payload
-        pkt.serialize()
+        # pkt = packet.Packet()
+        # pkt.add_protocol(ethernet.ethernet(ethertype=ether_types.ETH_TYPE_IP,
+        #                    src=src_mac, dst=dst_mac))
+        # pkt.add_protocol(b'Packet triggered from allocator')  # Add custom message to the payload
+        # pkt.serialize()
 
           # Simulate Packet-In message
         msg = parser.OFPPacketIn(datapath=datapath,
@@ -378,6 +425,7 @@ class FlowAllocator(app_manager.RyuApp):
                                 cookie=0,
                                 match=parser.OFPMatch(in_port=src_port),
                                 data=pkt.data)
+        
         # Manually invoke the packet_in_handler
         self.packet_in_handler(type("Event", (object,), {"msg": msg}))
         self.logger.info(f"Simulated Packet-In: {src_mac} -> {dst_mac} on Switch {src_switch}, Port {src_port}")
@@ -418,7 +466,6 @@ class FlowAllocator(app_manager.RyuApp):
         parser = dp.ofproto_parser
         ofproto = dp.ofproto
         in_port = msg.match["in_port"]
-        
 
         pkt = packet.Packet(msg.data)
         eth = pkt.get_protocol(ethernet.ethernet)
@@ -439,23 +486,51 @@ class FlowAllocator(app_manager.RyuApp):
         # elif eth.ethertype == ether_types.ETH_TYPE_IPV6:
         #     pkt_type = "IPv6"
         # else:
-        #     pkt_type = "Unknown"
-            
+        #     pkt_type = "Unknown"    
         # self.logger.info(f"PacketIn received: {pkt_type}")
-            
-        if eth.ethertype == ether_types.ETH_TYPE_LLDP:
-            return  # Ignore LLDP packets
         
-
-        self.logger.info(f"PacketIn received: {eth.src} -> {eth.dst} on Switch {dpid}, Port {in_port}")
+        if eth.ethertype in [ether_types.ETH_TYPE_LLDP, ether_types.ETH_TYPE_IPV6]:
+            return  # Ignore LLDP and IPv6 packets 
         
         src_mac = eth.src
         dst_mac = eth.dst
+        
+        # Avoid processing duplicate packets
+        packet_id = (src_mac, dst_mac, in_port, dpid)
+        
+        # Check if the packet has already been processed
+        current_time = time.time()
+        if packet_id in self.processed_packets:
+            self.logger.info(f"Ignoring duplicate packet: {packet_id}")
+            return
 
+        # Add the packet to the set of processed packets with a timestamp
+        self.processed_packets[packet_id] = current_time
+    
+        # Otherwise, add to the set of processed packets
+        # self.processed_packets.add(packet_id)
+            
+
+        self.logger.info(f"PacketIn received: {eth.src} -> {eth.dst} on Switch {dpid}, Port {in_port}")
+        
         # Aggiorna la struttura host_to_switch
         if src_mac not in self.host_to_switch:
             self.host_to_switch[src_mac] = {"dpid": dpid, "port": in_port}
             self.logger.info(f"Learned host: {src_mac} -> Switch {dpid}, Port {in_port}")
+        
+        arp_pkt = pkt.get_protocol(arp.arp)  # Detect ARP packets
+            
+          # 🟢 Handle ARP Packets Separately
+        if arp_pkt:
+            if arp_pkt.opcode == arp.ARP_REQUEST:
+                self.logger.info(f"[ARP Request] {src_mac} is asking for {arp_pkt.dst_ip}")
+            elif arp_pkt.opcode == arp.ARP_REPLY:
+                self.logger.info(f"[ARP Reply] {src_mac} says its IP is {arp_pkt.src_ip}")
+
+            # Learn the destination MAC from ARP replies
+            if arp_pkt.opcode == arp.ARP_REPLY and dst_mac not in self.host_to_switch:
+                self.host_to_switch[dst_mac] = {"dpid": dpid, "port": in_port}
+                self.logger.info(f"[Learning] Learned host: {dst_mac} -> Switch {dpid}, Port {in_port}")
 
         # Controlla se l'host di destinazione è noto
         if dst_mac in self.host_to_switch:
@@ -485,4 +560,4 @@ class FlowAllocator(app_manager.RyuApp):
         )
         dp.send_msg(out)
         
-        pprint(self.host_to_switch)
+        # pprint(f"\t[host_to_switch]", self.host_to_switch)

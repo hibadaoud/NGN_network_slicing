@@ -30,10 +30,10 @@ class MyTopo(Topo):
 
         self.addLink(s1, s2, bw=5)
         self.addLink(s1, s3, bw=7)
+        self.addLink(s1, s4, bw=20)
+        self.addLink(s2, s3, bw=10)
         self.addLink(s2, s4, bw=10)
         self.addLink(s3, s4, bw=5)
-        self.addLink(s2, s3, bw=10)
-        self.addLink(s1, s4, bw=20)
 
 
 def save_host_info(net):
@@ -71,7 +71,7 @@ def run_topology():
 
     # Create the network with the remote controller
     
-    net = Mininet(topo=MyTopo(), controller=lambda name: RemoteController(name, ip='127.0.0.1', port=6653))
+    net = Mininet(topo=MyTopo(), controller=lambda name: RemoteController(name, ip='127.0.0.1', port=6653), autoSetMacs=True) #autoStaticArp=True
 
     # Start the network
     net.start()
