@@ -1,4 +1,5 @@
 import logging
+import os
 from ryu.base import app_manager
 from ryu.controller import ofp_event
 from ryu.controller.handler import MAIN_DISPATCHER, DEAD_DISPATCHER, CONFIG_DISPATCHER, set_ev_cls
@@ -170,11 +171,11 @@ class FlowAllocator(app_manager.RyuApp):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
         dpid = datapath.id
-        # self.logger.info(f"datapath.id={datapath.id}")
-        # Create flow mod message
-        inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
+        
+        instructions = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
+
         mod = parser.OFPFlowMod(
-            datapath=datapath, priority=priority, match=match, instructions=inst
+            datapath=datapath, priority=priority, match=match, instructions=instructions
         )
         self.logger.debug(f"Adding flow: match={match}, actions={actions}")
         datapath.send_msg(mod)
@@ -292,13 +293,13 @@ class FlowAllocator(app_manager.RyuApp):
         dst_port = self.host_to_switch[dst_mac]['port']
 
         # Installa le regole di flusso
-        self.install_path_flows(path, src_mac, dst_mac, src_port, dst_port)
-        self.install_path_flows(path[::-1], dst_mac, src_mac, dst_port, src_port)
+        self.install_path_flows(path, src_mac, dst_mac, src_port, dst_port, bandwidth)
+        self.install_path_flows(path[::-1], dst_mac, src_mac, dst_port, src_port, bandwidth)
         
         self.logger.info(f"Flow successfully allocated from {src_mac} to {dst_mac}.")
         return True
 
-    def install_path_flows(self, path, src_mac, dst_mac, src_port, dst_port):
+    def install_path_flows(self, path, src_mac, dst_mac, src_port, dst_port, bandwidth):
         """
         Installs flow rules along the given path.
         Args:
@@ -307,6 +308,8 @@ class FlowAllocator(app_manager.RyuApp):
             dst_mac (str): Destination MAC address.
             src_port (int): Source port.
             dst_port (int): Destination port.
+            bandwidth (int): Bandwidth limit in Mbps.
+
         """
         for i in range(len(path)):
             datapath = self.get_datapath(path[i])
@@ -319,6 +322,7 @@ class FlowAllocator(app_manager.RyuApp):
                     # First switch: match src_mac and forward to the next switch
                     out_port = self.links[(path[i], path[i + 1])]["src_port"]
                     match = parser.OFPMatch(eth_src=src_mac, eth_dst=dst_mac, in_port=src_port)
+                
                 elif i == len(path) - 1:
                     self.logger.info(f"Last switch: {path[i]} -> host B")
                     # Last switch: forward to destination port
@@ -330,8 +334,9 @@ class FlowAllocator(app_manager.RyuApp):
                     out_port = self.links[(path[i], path[i + 1])]["src_port"]
                     match = parser.OFPMatch(eth_src=src_mac, eth_dst=dst_mac)
 
-                # Azioni di uscita
-                actions = [parser.OFPActionOutput(out_port)]
+                 #  Apply QoS queue instead of meter
+                queue_id = self.setup_qos_queue(datapath, out_port, bandwidth)
+                actions = [parser.OFPActionSetQueue(queue_id), parser.OFPActionOutput(out_port)]
                 self.add_flow(datapath, 1, match, actions)
 
             except KeyError:
@@ -339,6 +344,33 @@ class FlowAllocator(app_manager.RyuApp):
                 return
 
         self.logger.info(f"Flow rules installed along path: {path}")
+    
+    def setup_qos_queue(self, datapath, port, bandwidth):
+        """
+        Sets up a QoS queue to enforce bandwidth limits.
+        Args:
+            datapath: OpenFlow switch datapath.
+            port: The port number to apply the QoS queue.
+            bandwidth: Bandwidth limit in Mbps.
+        Returns:
+            The queue ID.
+        """
+        ofproto = datapath.ofproto
+        parser = datapath.ofproto_parser
+
+        queue_id = 1  # We assume only one queue per port
+
+        ovs_cmd = f"sudo ovs-vsctl -- set Port s{datapath.id}-eth{port} qos=@newqos -- \
+            --id=@newqos create QoS type=linux-htb other-config:max-rate={bandwidth * 1000000} \
+            queues=0=@q0 -- --id=@q0 create Queue other-config:min-rate={bandwidth * 1000000} \
+            other-config:max-rate={bandwidth * 1000000}"
+
+        os.system(ovs_cmd)  # Run the OVS command
+
+        self.logger.info(f"QoS Queue {queue_id} set on switch {datapath.id} port {port} with {bandwidth} Mbps")
+
+        return queue_id
+
 
     def get_datapath(self, switch_id):
         """

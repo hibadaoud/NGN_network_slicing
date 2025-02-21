@@ -3,6 +3,8 @@ from mininet.net import Mininet
 from mininet.node import RemoteController, OVSKernelSwitch
 from mininet.cli import CLI
 from mininet.log import setLogLevel
+from mininet.link import TCLink
+
 import json
 
 class MyTopo(Topo):
@@ -71,7 +73,7 @@ def run_topology():
 
     # Create the network with the remote controller
     
-    net = Mininet(topo=MyTopo(), controller=lambda name: RemoteController(name, ip='127.0.0.1', port=6653), autoSetMacs=True) #autoStaticArp=True
+    net = Mininet(topo=MyTopo(), link=TCLink, controller=lambda name: RemoteController(name, ip='127.0.0.1', port=6653), autoSetMacs=True) #autoStaticArp=True
 
     # Start the network
     net.start()
