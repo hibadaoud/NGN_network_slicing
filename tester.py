@@ -22,13 +22,6 @@ def get_mininet_macs():
     print("Host MACs loaded from file:", hosts_mac)
     return hosts_mac
 
-def extract_mac(ifconfig_output):
-    """
-    Extracts the MAC address from the ifconfig output.
-    """
-    match = re.search(r'ether ([0-9a-fA-F:]{17})', ifconfig_output)
-    return match.group(1) if match else None
-
 
 def select_hosts(hosts_mac):
     """
@@ -63,8 +56,6 @@ def send_curl_request(src, dst, bandwidth=8):
     """
     data = {
         "src": src['mac'],
-        "src_switch": src['connected_switch'],
-        "src_port": src['src_port'],
         "dst": dst['mac'],
         "bandwidth": bandwidth
     }

@@ -10,12 +10,10 @@ class FlowRequestHandler(ControllerBase):
     def allocate_flow(self, req, **kwargs):
         data = req.json if req.body else {}
         src = data.get('src')
-        src_switch = data.get('src_switch')
-        src_port = data.get('src_port')
         dst = data.get('dst')
         bandwidth = data.get('bandwidth')
 
-        if self.flow_allocator.allocate_flow(src, src_switch, src_port, dst, bandwidth):
+        if self.flow_allocator.allocate_flow(src, dst, bandwidth):
             return Response(status=200, json_body={'status': 'success'})
         return Response(status=400, json_body={'status': 'error', 'reason': 'Insufficient capacity'})
 
