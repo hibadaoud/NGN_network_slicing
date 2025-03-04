@@ -1,53 +1,21 @@
 import json
 import logging
 import os
+import threading
 from ryu.base import app_manager
 from ryu.controller import ofp_event
 from ryu.controller.handler import MAIN_DISPATCHER, DEAD_DISPATCHER, CONFIG_DISPATCHER, set_ev_cls
 from ryu.ofproto import ofproto_v1_3
-from ryu.lib.packet import packet, ethernet, ether_types, arp, ipv4, ipv6
+from ryu.lib.packet import packet, ethernet, ether_types
 from ryu.topology import event
-from ryu.topology.api import get_link, get_switch
+from ryu.topology.api import get_link
 from ryu.app.wsgi import WSGIApplication
-import yaml
-from flow_allocator_handler_REST import FlowRequestHandler
-import heapq
+from flow_allocator_handler_websocket import FlowWebSocketHandler
 from path_finder import PathFinder
-from time import sleep
 import time
-import threading
 
 
 from pprint import pprint
-
-PACKET_TIMEOUT = 5  # Timeout in seconds for duplicate packet detection
-
-# Link dictionary
-# links = {
-#     (1, 2): { # Link from switch 1 to switch 2 (s1 -> s2) 
-#         "src_port": 1, # Source port
-#         "dst_port": 1, # Destination port
-#         "src_hw_addr": "00:00:00:00:00:01", # Source MAC address
-#         "dst_hw_addr": "00:00:00:00:00:02", # Destination MAC address
-#     },
-#    (2, 1): { # Reverse link from switch 2 to switch 1 (s2 -> s1)
-#     ... 
-#    },
-# }
-
-# Datapath dictionary
-# datapaths = {
-#     1: {
-#         "id": 1,
-#         "ports": {
-#             1: "00:00:00:00:00:01",
-#             2: "00:00:00:00:00:02",
-#             3: "00:00:00:00:00:03",
-#         },
-#     },
-#     2: {
-#        ...
-#     },
 
 class FlowAllocator(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
@@ -68,58 +36,27 @@ class FlowAllocator(app_manager.RyuApp):
         self.logger.setLevel("INFO")
         self.logger.info("Initializing FlowAllocator...")
         
-        wsgi = kwargs['wsgi']
-        wsgi.register(FlowRequestHandler, {'flow_allocator': self})
-        self.logger.info("FlowRequestHandler registered!")
-
-        # self.mac_to_host = {
-        #     "h1":"02:98:a0:f3:45:07",
-        #     "h2":"e2:8d:18:27:c8:87",
-        #     "h3":"16:46:f6:62:b3:ab",
-        #     "h4":"a6:0c:58:e9:86:2d",
-        # }
-        # self.host_to_switch = {
-        #     "h1": 1,
-        #     "h2": 2,
-        #     "h3": 3,
-        #     "h4": 4,
-        # }
-        # self.mac_to_switch ={
-        #     "02:98:a0:f3:45:07": 1,
-        #     "e2:8d:18:27:c8:87": 2,
-        #     "16:46:f6:62:b3:ab": 3,
-        #     "a6:0c:58:e9:86:2d": 4,
-        # }
+        
+        # Avvia il server WebSocket in un thread separato
+        self.websocket_handler = FlowWebSocketHandler(flow_allocator=self, host="0.0.0.0", port=8765, logger=self.logger)
+        threading.Thread(target=self.websocket_handler.start, daemon=True).start()
+        self.logger.info("WebSocket handler started!")
+        
         
         self.host_to_switch = {}
         self._init_host_to_switch()
         
         self.flow_reservations = {}
-        # self.mac_to_switch = {}
         
         self.links = {}  
 
-        # self.mac_to_port = {}  # Initialize MAC-to-port dictionary
         self.datapaths = {}
-        self.flow_capacity = {
-            (1, 2): 5,
-            (2, 1): 5,  # Reverse link
-            (1, 3): 7,
-            (3, 1): 7,  # Reverse link
-            (2, 3): 10,
-            (3, 2): 10,  # Reverse link
-            (2, 4): 10,
-            (4, 2): 10,  # Reverse link
-            (3, 4): 5,
-            (4, 3): 5,  # Reverse link
-            (1, 4): 20,
-            (4, 1): 20,  # Reverse link
-        }
+        
+        self.flow_capacity = {}
+        self._init_flow_capacity()
 
         self.path_finder = PathFinder(self.flow_capacity, self.logger)
-        
-        # self.switches = {}
-    
+            
     def _init_host_to_switch(self):
         """
         Reads `/tmp/host_info.json` and initializes the host_to_switch dictionary.
@@ -157,18 +94,40 @@ class FlowAllocator(app_manager.RyuApp):
             self.logger.error(f"Unexpected error reading host info file: {e}")
             return False
     
-    def cleanup_processed_packets(self):
+    def _init_flow_capacity(self):
         """
-        Thread that periodically cleans up the set of processed packets.
+        Initializes the flow capacity dictionary based on bandwidth info from switch_links_info.json
         """
-        while True:
-            current_time = time.time()
-            # Remove packets older than the timeout
-            self.processed_packets = {
-                k: v for k, v in self.processed_packets.items() if current_time - v < PACKET_TIMEOUT
-            }
-            self.logger.info(f"Cleaned up processed packets. Remaining: {len(self.processed_packets)}")
-            time.sleep(PACKET_TIMEOUT)  # wait for the timeout period
+        self.logger.info("Initializing flow capacity dictionary...")
+
+        # Read the JSON file
+        try:
+            with open("/tmp/switch_links_info.json", "r") as f:
+                switch_links = json.load(f)
+        except FileNotFoundError:
+            self.logger.error("switch_links_info.json not found")
+            return
+        except json.JSONDecodeError:
+            self.logger.error("Error decoding switch_links_info.json")
+            return
+        
+        self.logger.info(f"Switch links info: {switch_links}")
+
+        # Process each link
+        for link_str, info in switch_links.items():
+            # Parse switches from string like "s1-s2"
+            sw1, sw2 = link_str.split("-")
+            sw1_id = int(sw1.lstrip("s"))
+            sw2_id = int(sw2.lstrip("s"))
+            
+            # Get bandwidth, default to 10 if not specified
+            bw = info.get("bandwidth", 10)
+
+            # Add both directions to flow capacity
+            self.flow_capacity[(sw1_id, sw2_id)] = bw
+            self.flow_capacity[(sw2_id, sw1_id)] = bw
+
+        self.logger.info(f"Flow capacities initialized: {self.flow_capacity}")
 
     @set_ev_cls(ofp_event.EventOFPStateChange, [MAIN_DISPATCHER, DEAD_DISPATCHER])
     def state_change_handler(self, ev):
@@ -206,7 +165,18 @@ class FlowAllocator(app_manager.RyuApp):
         self.logger.debug(f"Adding flow: match={match}, actions={actions}")
         datapath.send_msg(mod)
         self.logger.info(f"Flow added successfully.")
-        
+    
+    def _delete_flow(self, datapath, match):
+        ofproto = datapath.ofproto
+        parser = datapath.ofproto_parser
+        mod = parser.OFPFlowMod(
+            datapath=datapath, command=ofproto.OFPFC_DELETE, out_port=ofproto.OFPP_ANY, out_group=ofproto.OFPG_ANY,
+            match=match
+        )
+        self.logger.debug(f"Deleting flow: match={match}")
+        datapath.send_msg(mod)
+        self.logger.info(f"Flow deleted successfully.")
+         
     # ------------------------------------------------
     # 2) Topologia (SwitchEnter, LinkAdd, LinkDelete)
     # ------------------------------------------------
@@ -258,7 +228,8 @@ class FlowAllocator(app_manager.RyuApp):
                 "src_hw_addr": link.src.hw_addr,
                 "dst_hw_addr": link.dst.hw_addr,
             }
-        
+    
+    # 1. Endpoint per l'allocazione di un flusso
     def allocate_flow(self, src_mac, dst_mac, bandwidth):
         """
         Internal function to allocate a flow once MAC addresses are known.
@@ -318,6 +289,38 @@ class FlowAllocator(app_manager.RyuApp):
         self.logger.info(f"Flow reservation added: {src_mac} -> {dst_mac}")
         return True
     
+    # 2. Endpoint per la cancellazione di un flusso
+    def delete_flow(self, src_mac, dst_mac):
+        """
+        Deletes a flow reservation.
+        """
+        reservation = self.flow_reservations.get((src_mac, dst_mac))
+        if not reservation:
+            self.logger.error(f"Flow not found: {src_mac} -> {dst_mac}")
+            return False
+
+        path = reservation["path"]
+        bandwidth = reservation["bandwidth"]
+
+        # Restore the flow capacity
+        for i in range(len(path) - 1):
+            link = (path[i], path[i + 1])
+            reverse_link = (path[i + 1], path[i])
+            self.flow_capacity[link] += bandwidth
+            self.flow_capacity[reverse_link] += bandwidth
+            self.path_finder.link_capacities[link] = self.flow_capacity[link]
+            self.path_finder.link_capacities[reverse_link] = self.flow_capacity[reverse_link]
+        
+        self.path_finder.build_graph()
+        
+        self.flow_reservations.pop((src_mac, dst_mac))
+        self.logger.info(f"Flow reservation deleted: {src_mac} -> {dst_mac}")
+        
+        # Delete flow rules
+        self.delete_path_flows(path, src_mac, dst_mac)
+        self.delete_path_flows(path[::-1], dst_mac, src_mac)
+        
+        return True
     
     def check_reservation(self, src_mac, dst_mac):
         """
@@ -337,6 +340,18 @@ class FlowAllocator(app_manager.RyuApp):
         # Check if the reservation has expired
         if elapsed_time > 60:
             self.logger.error(f"Flow reservation expired: {src_mac} -> {dst_mac}")
+            for i in range(len(path) - 1):
+                link = (path[i], path[i + 1])
+                reverse_link = (path[i + 1], path[i])
+                self.flow_capacity[link] += bandwidth
+                self.flow_capacity[reverse_link] += bandwidth
+                self.path_finder.link_capacities[link] = self.flow_capacity[link]
+                self.path_finder.link_capacities[reverse_link] = self.flow_capacity[reverse_link]
+            
+            self.path_finder.build_graph()  # Rebuild the graph
+
+            self.logger.error(f"Flow capacity restored.")
+                
             return False
         
         self.logger.info(f"Applying flow reservation: {src_mac} -> {dst_mac}")
@@ -359,7 +374,6 @@ class FlowAllocator(app_manager.RyuApp):
         
         self.logger.info(f"Flow successfully allocated from {src_mac} to {dst_mac}.")
         return True
-    
 
     def install_path_flows(self, path, src_mac, dst_mac, src_port, dst_port, bandwidth):
         """
@@ -404,6 +418,38 @@ class FlowAllocator(app_manager.RyuApp):
 
         self.logger.info(f"Flow rules installed along path: {path}")
 
+    def delete_path_flows(self, path, src_mac, dst_mac):
+        """
+        Deletes flow rules along the given path.
+        Args:
+            path (list): List of switch IDs in the path.
+            src_mac (str): Source MAC address.
+            dst_mac (str): Destination MAC address.
+        """
+        for i in range(len(path)):
+            datapath = self.get_datapath(path[i])
+            parser = datapath.ofproto_parser
+            ofproto = datapath.ofproto
+
+            try:
+                if i == 0:
+                    # First switch: match src_mac and forward to the next switch
+                    match = parser.OFPMatch(eth_src=src_mac, eth_dst=dst_mac)
+                elif i == len(path) - 1:
+                    # Last switch: forward to destination port
+                    match = parser.OFPMatch(eth_src=src_mac, eth_dst=dst_mac)
+                else:
+                    # Intermediate switches
+                    match = parser.OFPMatch(eth_src=src_mac, eth_dst=dst_mac)
+
+                self._delete_flow(datapath, match)
+
+            except KeyError:
+                self.logger.error(f"Link not found: {path[i]} -> {path[i + 1]}")
+                return
+
+        self.logger.info(f"Flow rules deleted along path: {path}")
+    
     def setup_qos_queue(self, datapath, port, bandwidth):
         """
         Sets up a QoS queue to enforce bandwidth limits.

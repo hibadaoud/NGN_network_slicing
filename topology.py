@@ -50,7 +50,7 @@ class DynamicTopo(Topo):
 
 
 
-def save_host_info(net):
+def save_host_info(net: Mininet):
     """
     Collects and saves the MAC addresses and connected ports of the hosts in a JSON file.
     """
@@ -75,6 +75,36 @@ def save_host_info(net):
 
     print("Host info (MAC and port) saved to /tmp/host_info.json")
 
+def save_switch_links_info(net: Mininet):
+    """
+    Collects and saves the bandwidth information for switch-to-switch links in a JSON file.
+    """
+    switch_links = {}
+
+    for link in net.links:
+        if not isinstance(link, TCLink):  
+            continue  # Skip non-TC links
+
+        node1, node2 = link.intf1.node, link.intf2.node
+
+        if isinstance(node1, OVSKernelSwitch) and isinstance(node2, OVSKernelSwitch):
+            switch1, switch2 = node1.name, node2.name
+            link_pair = tuple(sorted([switch1, switch2]))
+            link_pair_reversed = tuple(reversed(link_pair))
+
+            if link_pair not in switch_links:
+                bw = link.intf1.params.get('bw') or link.intf2.params.get('bw') or "N/A"
+                switch_links["-".join(link_pair)] = {"bandwidth": bw}
+                
+            if link_pair_reversed not in switch_links:
+                bw = link.intf1.params.get('bw') or link.intf2.params.get('bw') or "N/A"
+                switch_links["-".join(link_pair_reversed)] = {"bandwidth": bw}
+
+    # Salva in un file JSON
+    with open("/tmp/switch_links_info.json", "w") as f:
+        json.dump(switch_links, f, indent=4)
+
+    print("Switch links info saved to /tmp/switch_links_info.json")
 
 def run_topology():
     # Set log level
@@ -92,6 +122,8 @@ def run_topology():
 
     # Save the MAC addresses of the hosts
     save_host_info(net)
+    
+    save_switch_links_info(net)
 
     # Open the Mininet CLI
     CLI(net)
