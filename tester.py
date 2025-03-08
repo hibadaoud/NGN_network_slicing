@@ -73,9 +73,9 @@ def send_curl_request(src, dst, bandwidth=8):
     try:
         response = json.loads(stdout)
         if response.get("status") == "success":
-            print("Flow successfully allocated!")
+            print("Flow successfully reserved!")
         else:
-            print(f"Error during flow allocation: {response.get('reason', 'Unknown error')}")
+            print(f"Error during flow reservation: {response.get('reason', 'Unknown error')}")
     except json.JSONDecodeError:
         print("Error decoding JSON response:", stdout)
 

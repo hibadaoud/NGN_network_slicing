@@ -9,43 +9,43 @@ import json
 
 class DynamicTopo(Topo):
     def __init__(self, topology_file):
-        # Inizializza la topologia base
+        # Initialize the base topology
         Topo.__init__(self)
 
-        # Carica la topologia dal file YAML
+        # Load topology from YAML file
         with open(topology_file, 'r') as f:
             topology_data = yaml.safe_load(f)
 
-        # Usa nomi diversi per non sovrascrivere gli attributi base
+        # Use different names to not overwrite the basic attributes
         self.hostNodes = {}
         self.switchNodes = {}
 
-        # Aggiungi gli host
+        # Add hosts
         for host in topology_data.get("hosts", {}):
             self.hostNodes[host] = self.addHost(host)
 
-        # Aggiungi gli switch
+        # Add switches
         for switch in topology_data.get("switches", {}):
             self.switchNodes[switch] = self.addSwitch(switch, cls=OVSKernelSwitch, protocols='OpenFlow13')
 
-        # Aggiungi link tra host e switch
+        # Add links between host and switch
         for link in topology_data.get("links", {}).get("hosts", []):
             node1 = link["node1"]
             node2 = link["node2"]
             self.addLink(self.getNode(node1), self.getNode(node2))
 
-        # Aggiungi link tra switch con banda opzionale
+        # Add link between switches with  bandwidth
         for link in topology_data.get("links", {}).get("switches", []):
             node1 = link["node1"]
             node2 = link["node2"]
-            bw = link.get("bw")  # Banda (opzionale)
+            bw = link.get("bw")  
             if bw:
                 self.addLink(self.getNode(node1), self.getNode(node2), bw=bw)
             else:
                 self.addLink(self.getNode(node1), self.getNode(node2))
 
-    def getNode(self, name):
-        """Restituisce il riferimento di un host o di uno switch dato il suo nome."""
+    def getNode(self, name):    
+        """Returns a reference to a host or switch given its name."""        
         return self.hostNodes.get(name) or self.switchNodes.get(name)
 
 

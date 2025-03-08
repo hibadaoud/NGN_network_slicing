@@ -72,25 +72,6 @@ class FlowAllocator(app_manager.RyuApp):
         wsgi.register(FlowRequestHandler, {'flow_allocator': self})
         self.logger.info("FlowRequestHandler registered!")
 
-        # self.mac_to_host = {
-        #     "h1":"02:98:a0:f3:45:07",
-        #     "h2":"e2:8d:18:27:c8:87",
-        #     "h3":"16:46:f6:62:b3:ab",
-        #     "h4":"a6:0c:58:e9:86:2d",
-        # }
-        # self.host_to_switch = {
-        #     "h1": 1,
-        #     "h2": 2,
-        #     "h3": 3,
-        #     "h4": 4,
-        # }
-        # self.mac_to_switch ={
-        #     "02:98:a0:f3:45:07": 1,
-        #     "e2:8d:18:27:c8:87": 2,
-        #     "16:46:f6:62:b3:ab": 3,
-        #     "a6:0c:58:e9:86:2d": 4,
-        # }
-        
         self.host_to_switch = {}
         self._init_host_to_switch()
         
@@ -196,8 +177,6 @@ class FlowAllocator(app_manager.RyuApp):
     def add_flow(self, datapath, priority, match, actions):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
-        dpid = datapath.id
-        # self.logger.info(f"datapath.id={datapath.id}")
         # Create flow mod message
         inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
         mod = parser.OFPFlowMod(
@@ -337,6 +316,16 @@ class FlowAllocator(app_manager.RyuApp):
         # Check if the reservation has expired
         if elapsed_time > 60:
             self.logger.error(f"Flow reservation expired: {src_mac} -> {dst_mac}")
+            # Restore capacities
+            for i in range(len(path) - 1):
+                link = (path[i], path[i + 1])
+                reverse_link = (path[i + 1], path[i])
+                self.flow_capacity[link] += bandwidth
+                self.flow_capacity[reverse_link] += bandwidth
+                self.path_finder.link_capacities[link] = self.flow_capacity[link]
+                self.path_finder.link_capacities[reverse_link] = self.flow_capacity[reverse_link]
+
+            self.path_finder.build_graph()  # Rebuild the graph
             return False
         
         self.logger.info(f"Applying flow reservation: {src_mac} -> {dst_mac}")
@@ -356,7 +345,8 @@ class FlowAllocator(app_manager.RyuApp):
         # Installa le regole di flusso
         self.install_path_flows(path, src_mac, dst_mac, src_port, dst_port, bandwidth)
         self.install_path_flows(path[::-1], dst_mac, src_mac, dst_port, src_port, bandwidth)
-        
+
+             
         self.logger.info(f"Flow successfully allocated from {src_mac} to {dst_mac}.")
         return True
     
