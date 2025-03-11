@@ -7,9 +7,11 @@ class PathFinder:
         :param link_capacities: Dictionary of link capacities {(node1, node2): capacity}.
         :param logger: Logger from the Ryu controller.
         """
+        self.graph = None
         self.link_capacities = link_capacities
         self.logger = logger
         self.build_graph()
+        
 
     def build_graph(self):
         """
@@ -24,7 +26,7 @@ class PathFinder:
         self.logger.info(f"Graph structure: {graph}")
         self.graph = graph
 
-    def find_max_bandwidth_path(self, src, dst, required_bandwidth):
+    def find_max_bandwidth_path(self, src, dst, required_bandwidth=0):
         """
         Finds a path with sufficient bandwidth between src and dst.
 
@@ -41,6 +43,10 @@ class PathFinder:
 
         # Priority queue for maximum bandwidth path search
         pq = [(-float('inf'), src_dpid, [])]  # (-bandwidth, current_node, path)
+        
+        # print all pq values
+        self.logger.info(f"pq: {pq}")
+        
         visited = set()
 
         while pq:
@@ -51,15 +57,20 @@ class PathFinder:
             if node in visited:
                 continue
             visited.add(node)
+            
+            self.logger.info(f"Visited nodes: {visited}")
 
             # If destination is reached, return the path and bottleneck bandwidth
             if node == dst_dpid:
+                self.logger.info(f"Destination reached: {node}")
                 if bandwidth >= required_bandwidth:
                     self.logger.info(f"Path found: {path + [dst_dpid]}, bandwidth: {bandwidth}")
                     return path + [dst_dpid], bandwidth
 
+            self.logger.info(f"Neighbors: {self.graph.get(node, {})}")
             # Evaluate neighbors
             for neighbor, capacity in self.graph.get(node, {}).items():
+                self.logger.info(f"Neighbor: {neighbor}, capacity: {capacity}")
                 if neighbor not in visited:
                     new_bandwidth = min(bandwidth, capacity) if bandwidth != float('inf') else capacity
                     if new_bandwidth >= required_bandwidth:  # Only consider valid links

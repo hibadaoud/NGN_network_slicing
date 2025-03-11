@@ -1,44 +1,53 @@
+import yaml
 from mininet.topo import Topo
 from mininet.net import Mininet
 from mininet.node import RemoteController, OVSKernelSwitch
 from mininet.cli import CLI
 from mininet.log import setLogLevel
-from mininet.link import TCLink
-
 import json
 
-class MyTopo(Topo):
-    def __init__(self):
-        # Initialize topology
+class DynamicTopo(Topo):
+    def __init__(self, topology_file):
+        # Initializes the base topology
         Topo.__init__(self)
 
+        # Load the topology from the YAML file
+        with open(topology_file, 'r') as f:
+            topology_data = yaml.safe_load(f)
+
+        # Use different names to avoid overwriting base attributes
+        self.hostNodes = {}
+        self.switchNodes = {}
+
         # Add hosts
-        h1 = self.addHost('h1')
-        h2 = self.addHost('h2')
-        h3 = self.addHost('h3')
-        h4 = self.addHost('h4')
+        for host in topology_data.get("hosts", {}):
+            self.hostNodes[host] = self.addHost(host)
 
         # Add switches
-        s1 = self.addSwitch('s1', cls=OVSKernelSwitch, protocols='OpenFlow13')
-        s2 = self.addSwitch('s2',cls=OVSKernelSwitch, protocols='OpenFlow13')
-        s3 = self.addSwitch('s3',cls=OVSKernelSwitch, protocols='OpenFlow13')
-        s4 = self.addSwitch('s4', cls=OVSKernelSwitch, protocols='OpenFlow13')
+        for switch in topology_data.get("switches", {}):
+            self.switchNodes[switch] = self.addSwitch(switch, cls=OVSKernelSwitch, protocols='OpenFlow13')
 
-        # Add links with bandwidth capacities
-        self.addLink(h1, s1)
-        self.addLink(h2, s2)
-        self.addLink(h3, s3)
-        self.addLink(h4, s4)
+        # Add links between hosts and switches
+        for link in topology_data.get("links", {}).get("hosts", []):
+            node1 = link["node1"]
+            node2 = link["node2"]
+            self.addLink(self.getNode(node1), self.getNode(node2))
 
-        self.addLink(s1, s2, bw=5)
-        self.addLink(s1, s3, bw=7)
-        self.addLink(s1, s4, bw=20)
-        self.addLink(s2, s3, bw=10)
-        self.addLink(s2, s4, bw=10)
-        self.addLink(s3, s4, bw=5)
+        # Add links between switches with optional bandwidth
+        for link in topology_data.get("links", {}).get("switches", []):
+            node1 = link["node1"]
+            node2 = link["node2"]
+            bw = link.get("bw")  # Bandwidth (optional)
+            if bw:
+                self.addLink(self.getNode(node1), self.getNode(node2), bw=bw)
+            else:
+                self.addLink(self.getNode(node1), self.getNode(node2))
 
+    def getNode(self, name):
+        """Returns the reference of a host or switch given its name."""
+        return self.hostNodes.get(name) or self.switchNodes.get(name)
 
-def save_host_info(net):
+def save_host_info(net: Mininet):
     """
     Collects and saves the MAC addresses and connected ports of the hosts in a JSON file.
     """
@@ -46,19 +55,16 @@ def save_host_info(net):
 
     for host in net.hosts:
         mac = host.MAC()
-        # Get the link information for the host
-        intf = host.intfList()[0]  # Assuming the host has only one interface
+        intf = host.intfList()[0]
         link = intf.link
         if link:
-            # Get the connected switch and port number
-            connected_switch = int(link.intf2.node.name.split("s")[-1])
-            connected_port = link.intf2.name.split("-")[-1]
-            connected_port = int(connected_port.split("eth")[-1])
+            connected_switch = link.intf2.node.name  # Store switch name instead of number
+            connected_port = int(link.intf2.name.split("eth")[-1])
 
             host_info[host.name] = {
                 "mac": mac,
-                "connected_switch": connected_switch,  # Name of the connected switch
-                "src_port": connected_port,  # Port number on the switch
+                "connected_switch": connected_switch,
+                "src_port": connected_port,
             }
 
     with open("/tmp/host_info.json", "w") as f:
@@ -66,26 +72,57 @@ def save_host_info(net):
 
     print("Host info (MAC and port) saved to /tmp/host_info.json")
 
+def save_switch_links_info(net: Mininet):
+    """
+    Collects and saves the bandwidth information for switch-to-switch links in a JSON file.
+    """
+    switch_links = {}
+
+    for link in net.links:
+        if not isinstance(link, TCLink):  
+            continue  # Skip non-TC links
+
+        node1, node2 = link.intf1.node, link.intf2.node
+
+        if isinstance(node1, OVSKernelSwitch) and isinstance(node2, OVSKernelSwitch):
+            switch1, switch2 = node1.name, node2.name
+            link_pair = tuple(sorted([switch1, switch2]))
+            link_pair_reversed = tuple(reversed(link_pair))
+
+            if link_pair not in switch_links:
+                bw = link.intf1.params.get('bw') or link.intf2.params.get('bw') or "N/A"
+                switch_links["-".join(link_pair)] = {"bandwidth": bw}
+                
+            if link_pair_reversed not in switch_links:
+                bw = link.intf1.params.get('bw') or link.intf2.params.get('bw') or "N/A"
+                switch_links["-".join(link_pair_reversed)] = {"bandwidth": bw}
+
+    # Save to a JSON file
+    with open("/tmp/switch_links_info.json", "w") as f:
+        json.dump(switch_links, f, indent=4)
+
+    print("Switch links info saved to /tmp/switch_links_info.json")
 
 def run_topology():
-    # Sets the log level
+    # Set log level
     setLogLevel('info')
 
     # Create the network with the remote controller
     
-    net = Mininet(topo=MyTopo(), link=TCLink, controller=lambda name: RemoteController(name, ip='127.0.0.1', port=6653), autoSetMacs=True) #autoStaticArp=True
+    net = Mininet(topo=MyTopo(), controller=lambda name: RemoteController(name, ip='127.0.0.1', port=6653), autoSetMacs=True) #autoStaticArp=True
 
     # Start the network
     net.start()
 
     # Save the MAC addresses of the hosts
     save_host_info(net)
+    
+    save_switch_links_info(net)
 
-
-    # Open the Mininet CLI for manual interaction
+    # Open the Mininet CLI
     CLI(net)
 
-    # Stops the network when the CLI is closed
+    # Stop the network when CLI exits
     net.stop()
 
 
