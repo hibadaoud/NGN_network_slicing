@@ -22,7 +22,18 @@ class FlowWebSocketHandler:
         else:
             self.logger = logger
 
-    async def handler(self, websocket, path):
+    async def handler(self, websocket):
+        """
+        WebSocket handler that processes incoming messages and manages flow allocation requests.
+        This handler supports various commands for network flow management:
+        - allocate_flow: Allocates bandwidth for a flow between source and destination
+        - show_reservation: Displays current flow reservations
+        - delete_flow: Removes an existing flow
+        - dump_flows: Shows OpenFlow rules for a specific switch
+        Args:
+            websocket: The WebSocket connection object
+        """
+
         self.logger.info("New WebSocket client connected")
 
         try:

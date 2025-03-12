@@ -1,5 +1,7 @@
 import json
 import logging
+import os
+import threading
 from ryu.base import app_manager
 from ryu.controller import ofp_event
 from ryu.controller.handler import MAIN_DISPATCHER, DEAD_DISPATCHER, CONFIG_DISPATCHER, set_ev_cls
@@ -12,14 +14,29 @@ from flow_allocator_handler_websocket import FlowWebSocketHandler
 from path_finder import PathFinder
 import time
 
-
-from pprint import pprint
-
 class FlowAllocator(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
     _CONTEXTS = {'wsgi': WSGIApplication}
 
     def __init__(self, *args, **kwargs):
+        """
+        Initialize the FlowAllocator class.
+        This class acts as a flow allocation controller that manages network flows, WebSocket connections, 
+        and maintains network topology information. It sets up logging, initializes a WebSocket server,
+        and maintains various data structures for network management.
+        Args:
+            *args: Variable length argument list.
+            **kwargs: Arbitrary keyword arguments.
+        Attributes:
+            websocket_handler (FlowWebSocketHandler): Handles WebSocket connections for flow management
+            host_to_switch (dict): Mapping of hosts to their connected switches
+            flow_reservations (dict): Stores active flow reservations
+            links (dict): Network topology links information
+            datapaths (dict): Stores OpenFlow switch datapaths
+            flow_capacity (dict): Network link capacity information
+            path_finder (PathFinder): Handles path computation between network nodes
+        """
+
         super(FlowAllocator, self).__init__(*args, **kwargs)
         
         # Configure the logger
@@ -129,6 +146,20 @@ class FlowAllocator(app_manager.RyuApp):
 
     @set_ev_cls(ofp_event.EventOFPStateChange, [MAIN_DISPATCHER, DEAD_DISPATCHER])
     def state_change_handler(self, ev):
+        """
+        Handles state changes in the OpenFlow switches.
+        This method tracks switch connections and disconnections, updating the internal
+        datapath dictionary accordingly. It logs when switches connect or disconnect
+        from the controller.
+        Args:
+            ev (ryu.controller.event.EventSwitchBase): Event containing switch state change information
+                - ev.datapath: The switch's datapath object
+                - ev.state: The new state of the switch
+        Side effects:
+            - Updates self.datapaths dictionary
+            - Logs switch connection/disconnection events
+        """
+
         datapath = ev.datapath
         if ev.state == MAIN_DISPATCHER:
             self.datapaths[datapath.id] = datapath  # Add datapath
@@ -139,6 +170,19 @@ class FlowAllocator(app_manager.RyuApp):
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
+        """
+        Handle switch features reply to negotiate OpenFlow version.
+        This method is called when a switch connects to the controller and sends its features.
+        It sets up the initial configuration for the switch by installing a default flow rule
+        that sends all packets to the controller.
+        Parameters
+        ----------
+        ev : ryu.controller.event.EventSwitchFeatures
+            Event containing information about the connected switch including the datapath object.
+        ----
+        The default rule installed has the lowest priority (0) and matches all packets,
+        sending them to the controller for processing.
+        """
         datapath = ev.msg.datapath
         dpid = datapath.id  # Datapath ID of the switch
         self.logger.info(f"Switch connected: dpid={dpid}")
@@ -151,14 +195,22 @@ class FlowAllocator(app_manager.RyuApp):
         self.add_flow(datapath, 0, match, actions)
 
     def add_flow(self, datapath, priority, match, actions):
+        """
+        Add a flow entry to the OpenFlow switch.
+        This method installs a flow rule in the switch's flow table using OpenFlow protocol.
+        The flow rule specifies how to handle packets that match certain criteria.
+        Args:
+            datapath: The switch object representing the OpenFlow switch
+            priority: Integer indicating the priority of this flow rule
+            match: Match object defining the packet match criteria
+            actions: List of action objects defining what to do with matching packets
+        """
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
-        dpid = datapath.id
-        
-        instructions = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
-
+        # Create flow mod message
+        inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
         mod = parser.OFPFlowMod(
-            datapath=datapath, priority=priority, match=match, instructions=instructions
+            datapath=datapath, priority=priority, match=match, instructions=inst
         )
         self.logger.debug(f"Adding flow: match={match}, actions={actions}")
         datapath.send_msg(mod)
@@ -180,6 +232,17 @@ class FlowAllocator(app_manager.RyuApp):
     # ------------------------------------------------
     @set_ev_cls(event.EventSwitchEnter)
     def switch_enter_handler(self, ev):
+        """
+        Handler function for switch enter events in the network.
+        This method is triggered when a new switch enters the network topology. It updates
+        the network topology information and logs changes in network links.
+        Args:
+            ev (EventSwitchEnter): Event object containing information about the switch
+                that entered the network. Contains the switch datapath object.
+        Attributes modified:
+            self.links: Dictionary storing the current network link information
+        """
+        
         old_links = dict(self.links)
         self.logger.info(f"Switch entered: {ev.switch.dp.id}")
         # self._get_topology_data()
@@ -188,10 +251,27 @@ class FlowAllocator(app_manager.RyuApp):
 
     @set_ev_cls(event.EventLinkAdd)
     def link_add_handler(self, ev):
+        """
+        Handler function for link addition events in the network topology.
+        This method is triggered when a new link is added to the network. It updates the
+        topology information by calling _get_topology_data() to refresh the network view.
+        Parameters:
+            ev: ryu.topology.event.EventLinkAdd
+                The event object containing information about the added link.
+        """
+
         self._get_topology_data()
 
     @set_ev_cls(event.EventLinkDelete)
     def link_delete_handler(self, ev):
+        """
+        Handles link deletion events in the network.
+        This method is triggered when a link is deleted from the network topology.
+        It logs information about the deleted link and the updated network links.
+        Args:
+            ev: The link deletion event object containing details about the deleted link
+        """
+
         self.logger.info(f"Link deleted. Updated links: {self.links}")
         
     def _get_topology_data(self):
@@ -221,7 +301,16 @@ class FlowAllocator(app_manager.RyuApp):
 
     def allocate_flow(self, src_mac, dst_mac, bandwidth):
         """
-        Internal function to allocate a flow between two MAC addresses.
+        Reserves network flow between two hosts with specified bandwidth requirements.
+        This function performs the following operations:
+        1. Validates source and destination MAC addresses
+        2. Finds a path with sufficient bandwidth between hosts
+        3. Updates network capacity along the chosen path
+        5. Records the flow reservation
+        Args:
+            src_mac (str): Source host MAC address
+            dst_mac (str): Destination host MAC address 
+            bandwidth (float): Required bandwidth in Mbps
         """
         # Check if src_mac and dst_mac exist in host_to_switch mapping
         if src_mac not in self.host_to_switch or dst_mac not in self.host_to_switch:
@@ -268,14 +357,137 @@ class FlowAllocator(app_manager.RyuApp):
         
         self.path_finder.build_graph()  # Rebuild the graph
 
-        
-        # Ottieni src_port e dst_port dai dizionari
-        src_port = self.host_to_switch[src_mac]['port']
-        dst_port = self.host_to_switch[dst_mac]['port']
+        self.flow_reservations[(src_mac, dst_mac)] = {
+            "path": path,
+            "bandwidth": bandwidth,
+            "start_time": time.time()
+        }
+        self.logger.info(f"Flow reservation added: {src_mac} -> {dst_mac}")
+        return True
+    
+    # 2. Endpoint for deleting a flow
+    def delete_flow(self, src_mac, dst_mac):
+        """
+        Delete a flow reservation and allocation and restore network capacity.
+        This function removes a previously established flow between two MAC addresses,
+        restores the bandwidth capacity along the path, and deletes the corresponding
+        flow rules from the switches.
+        Args:
+            src_mac (str): Source MAC address of the flow
+            dst_mac (str): Destination MAC address of the flow
+        """
+        reservation = self.flow_reservations.get((src_mac, dst_mac))
+        if not reservation:
+            self.logger.error(f"Flow not found: {src_mac} -> {dst_mac}")
+            return False
 
-        # Installa le regole di flusso
-        self.install_path_flows(path, src_mac, dst_mac, src_port, dst_port)
-        self.install_path_flows(path[::-1], dst_mac, src_mac, dst_port, src_port)
+        path = reservation["path"]
+        bandwidth = reservation["bandwidth"]
+
+        # Restore the flow capacity
+        for i in range(len(path) - 1):
+            link = (path[i], path[i + 1])
+            reverse_link = (path[i + 1], path[i])
+            self.flow_capacity[link] += bandwidth
+            self.flow_capacity[reverse_link] += bandwidth
+            self.path_finder.link_capacities[link] = self.flow_capacity[link]
+            self.path_finder.link_capacities[reverse_link] = self.flow_capacity[reverse_link]
+        
+        self.path_finder.build_graph()
+        
+        self.flow_reservations.pop((src_mac, dst_mac))
+        self.logger.info(f"Flow reservation deleted: {src_mac} -> {dst_mac}")
+        
+        # Delete flow rules
+        self.delete_path_flows(path, src_mac, dst_mac)
+        self.delete_path_flows(path[::-1], dst_mac, src_mac)
+        
+        return True
+    
+    def show_reservation(self):
+        """
+        Returns all current flow reservations as a dictionary.
+        Returns:
+            dict: Dictionary containing all flow reservations and their details
+        """
+        try:
+            reservations = {}
+            for (src_mac, dst_mac), reservation in self.flow_reservations.items():
+                path = reservation["path"]
+                bandwidth = reservation["bandwidth"]
+                start_time = reservation["start_time"]
+                elapsed = time.time() - start_time
+
+                reservations[f"{src_mac}->{dst_mac}"] = {
+                    "path": path,
+                    "bandwidth": bandwidth,
+                    "elapsed_time": f"{elapsed:.2f}",
+                    "start_time": start_time
+                }
+            
+            print(f"Reservations: {reservations}")  # Log the reservations
+            return reservations
+        except Exception as e:
+            print(f"Error in show_reservation: {str(e)}")
+            return {}
+
+        
+    def check_reservation(self, src_mac, dst_mac):
+        """
+        Validates a flow reservation and allocates the correspanded flow between between two hosts.
+        This function checks if there is an existing flow reservation between the specified source
+        and destination MAC addresses, verifies if it hasn't expired, and installs the necessary
+        flow rules if valid. If the reservation has expired, it restores the network capacity.
+        Args:
+            src_mac (str): Source host MAC address
+            dst_mac (str): Destination host MAC address
+        """
+        
+        reservation = self.flow_reservations.get((src_mac, dst_mac))
+        if not reservation:
+            self.logger.error(f"Flow not found: {src_mac} -> {dst_mac}")
+            return False
+
+        path = reservation["path"]
+        bandwidth = reservation["bandwidth"]
+        start_time = reservation["start_time"]
+        current_time = time.time()
+        elapsed_time = current_time - start_time
+
+        # Check if the reservation has expired
+        if elapsed_time > 180:
+            self.logger.error(f"Flow reservation expired: {src_mac} -> {dst_mac}")
+            for i in range(len(path) - 1):
+                link = (path[i], path[i + 1])
+                reverse_link = (path[i + 1], path[i])
+                self.flow_capacity[link] += bandwidth
+                self.flow_capacity[reverse_link] += bandwidth
+                self.path_finder.link_capacities[link] = self.flow_capacity[link]
+                self.path_finder.link_capacities[reverse_link] = self.flow_capacity[reverse_link]
+            
+            self.path_finder.build_graph()  # Rebuild the graph
+
+            self.logger.error(f"Flow capacity restored.")
+                
+            return False
+        
+        self.logger.info(f"Applying flow reservation: {src_mac} -> {dst_mac}")
+
+        try:
+            src_port = self.host_to_switch[src_mac]['src_port']
+        except KeyError:
+            self.logger.error(f"Source port not found for host with MAC {src_mac}")
+            return False
+
+        try:
+            dst_port = self.host_to_switch[dst_mac]['src_port']
+        except KeyError:
+            self.logger.error(f"Destination port not found for host with MAC {dst_mac}")
+            return False
+        
+        # Install the flow rules
+        self.install_path_flows(path, src_mac, dst_mac, src_port, dst_port, bandwidth)
+        self.install_path_flows(path[::-1], dst_mac, src_mac, dst_port, src_port, bandwidth)
         
         self.logger.info(f"Flow successfully allocated from {src_mac} to {dst_mac}.")
 
@@ -290,8 +502,6 @@ class FlowAllocator(app_manager.RyuApp):
             dst_mac (str): Destination MAC address.
             src_port (int): Source port.
             dst_port (int): Destination port.
-            bandwidth (int): Bandwidth limit in Mbps.
-
         """
         for i in range(len(path)):
             datapath = self.get_datapath(path[i])
@@ -303,7 +513,6 @@ class FlowAllocator(app_manager.RyuApp):
                     # First switch: match src_mac and forward to the next switch
                     out_port = self.links[(path[i], path[i + 1])]["src_port"]
                     match = parser.OFPMatch(eth_src=src_mac, eth_dst=dst_mac, in_port=src_port)
-                
                 elif i == len(path) - 1:
                     self.logger.info(f"Last switch: {path[i]} -> host B")
                     # Last switch: forward to destination port
@@ -315,8 +524,9 @@ class FlowAllocator(app_manager.RyuApp):
                     out_port = self.links[(path[i], path[i + 1])]["src_port"]
                     match = parser.OFPMatch(eth_src=src_mac, eth_dst=dst_mac)
 
-                # Azioni di uscita
-                actions = [parser.OFPActionOutput(out_port)]
+               #  Apply QoS queue to enforce bandwidth limitation
+                queue_id = self.setup_qos_queue(datapath, out_port, bandwidth)
+                actions = [parser.OFPActionSetQueue(queue_id), parser.OFPActionOutput(out_port)]
                 self.add_flow(datapath, 1, match, actions)
 
             except KeyError:
@@ -325,6 +535,60 @@ class FlowAllocator(app_manager.RyuApp):
 
         self.logger.info(f"Flow rules installed along path: {path}")
 
+    def delete_path_flows(self, path, src_mac, dst_mac):
+        """
+        Deletes flow rules along the given path.
+        Args:
+            path (list): List of switch IDs in the path.
+            src_mac (str): Source MAC address.
+            dst_mac (str): Destination MAC address.
+        """
+        for i in range(len(path)):
+            datapath = self.get_datapath(path[i])
+            parser = datapath.ofproto_parser
+
+            try:
+                if i == 0:
+                    # First switch: match src_mac and forward to the next switch
+                    match = parser.OFPMatch(eth_src=src_mac, eth_dst=dst_mac)
+                elif i == len(path) - 1:
+                    # Last switch: forward to destination port
+                    match = parser.OFPMatch(eth_src=src_mac, eth_dst=dst_mac)
+                else:
+                    # Intermediate switches
+                    match = parser.OFPMatch(eth_src=src_mac, eth_dst=dst_mac)
+
+                self._delete_flow(datapath, match)
+
+            except KeyError:
+                self.logger.error(f"Link not found: {path[i]} -> {path[i + 1]}")
+                return
+
+        self.logger.info(f"Flow rules deleted along path: {path}")
+    
+    def setup_qos_queue(self, datapath, port, bandwidth):
+        """
+        Sets up a QoS queue to enforce bandwidth limits.
+        Args:
+            datapath: OpenFlow switch datapath.
+            port: The port number to apply the QoS queue.
+            bandwidth: Bandwidth limit in Mbps.
+        Returns:
+            The queue ID.
+        """
+        queue_id = 1  # We assume only one queue per port
+
+        ovs_cmd = f"sudo ovs-vsctl -- set Port s{datapath.id}-eth{port} qos=@newqos -- \
+            --id=@newqos create QoS type=linux-htb other-config:max-rate={bandwidth * 1000000} \
+            queues=0=@q0 -- --id=@q0 create Queue other-config:min-rate={bandwidth * 1000000} \
+            other-config:max-rate={bandwidth * 1000000}"
+
+        os.system(ovs_cmd)  # Run the OVS command
+
+        self.logger.info(f"QoS Queue {queue_id} set on switch {datapath.id} port {port} with {bandwidth} Mbps")
+
+        return queue_id
+    
     def get_datapath(self, switch_id):
         """
         Maps a switch ID to its datapath object.
@@ -340,11 +604,17 @@ class FlowAllocator(app_manager.RyuApp):
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def packet_in_handler(self, ev):
         """
-        Handles the PacketIn event to learn host locations and forward packets.
-        Args:
-            ev: The event object containing the packet and metadata.
+        Handles incoming packets in the OpenFlow controller.
+        This method processes packets that arrive at the controller from switches. It performs
+        the following main functions:
+        - Extracts packet information (MAC addresses, switch info, ports)
+        - Ignores LLDP and IPv6 packets
+        - Checks if flow rules are already installed for the source-destination pair
+        - Forwards packets based on known host locations
+        - Implements packet forwarding with appropriate OpenFlow actions
+        Parameters:
+            ev (EventPacketIn): Event object containing the packet-in message from the switch
         """
-        
         msg = ev.msg
         dp = msg.datapath
         dpid = dp.id
@@ -395,4 +665,3 @@ class FlowAllocator(app_manager.RyuApp):
         )
         dp.send_msg(out)
         
-        # pprint(f"\t[host_to_switch]", self.host_to_switch)

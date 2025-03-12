@@ -4,10 +4,17 @@ from mininet.net import Mininet
 from mininet.node import RemoteController, OVSKernelSwitch
 from mininet.cli import CLI
 from mininet.log import setLogLevel
+from mininet.link import TCLink
 import json
 
 class DynamicTopo(Topo):
     def __init__(self, topology_file):
+        """
+        Initialize a custom network topology from a YAML file.
+        The topology consists of hosts and switches connected via links. The YAML file should define
+        the topology structure including hosts, switches, and their interconnections.
+        """
+
         # Initializes the base topology
         Topo.__init__(self)
 
@@ -107,9 +114,12 @@ def run_topology():
     # Set log level
     setLogLevel('info')
 
-    # Create the network with the remote controller
-    
-    net = Mininet(topo=MyTopo(), controller=lambda name: RemoteController(name, ip='127.0.0.1', port=6653), autoSetMacs=True) #autoStaticArp=True
+    # Load the topology dynamically from YAML
+    topology_file = "topology.yaml"
+    topo = DynamicTopo(topology_file)
+
+    # Create network with remote controller
+    net = Mininet(topo=topo, link=TCLink, controller=lambda name: RemoteController(name, ip='127.0.0.1', port=6653), autoSetMacs=True, autoStaticArp=True)
 
     # Start the network
     net.start()
