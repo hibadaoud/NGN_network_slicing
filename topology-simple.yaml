@@ -1,0 +1,30 @@
+hosts:
+  h1:
+  h2:
+  h3:
+  h4:
+  h5:
+  h6:
+
+switches:
+  s1:
+  s2:
+
+links:
+  hosts:
+    - node1: h1
+      node2: s1
+    - node1: h2
+      node2: s1
+    - node1: h3
+      node2: s1
+    - node1: h4
+      node2: s2
+    - node1: h5
+      node2: s2
+    - node1: h6
+      node2: s2
+  switches:
+    - node1: s1
+      node2: s2
+      bw: 10

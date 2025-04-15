@@ -115,7 +115,8 @@ def run_topology():
     setLogLevel('info')
 
     # Load the topology dynamically from YAML
-    topology_file = "topology.yaml"
+    # topology_file = "topology.yaml"
+    topology_file = "topology-simple.yaml"
     topo = DynamicTopo(topology_file)
 
     # Create network with remote controller
