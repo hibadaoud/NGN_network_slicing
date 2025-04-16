@@ -4,7 +4,8 @@ import os
 import websockets
 
 # URI of the WebSocket server (must match the configuration of your handler)
-WS_SERVER_URI = "ws://127.0.0.1:8765"
+WS_SERVER_CONTROLLER_URI = "ws://127.0.0.1:8765"
+WS_SERVER_MININET_URI = "ws://127.0.0.1:9876"
 
 def get_mininet_macs():
     """
@@ -20,6 +21,11 @@ def get_mininet_macs():
         hosts_mac = json.load(f)
 
     print("MAC addresses loaded:", hosts_mac)
+    
+    # in each one add the key as 'name'
+    for host, mac_info in hosts_mac.items():
+        mac_info['name'] = host
+    
     return hosts_mac
 
 def select_hosts(hosts_mac):
@@ -48,15 +54,25 @@ def select_hosts(hosts_mac):
         print("Invalid selection.")
         return None, None
 
-async def send_ws_request(data):
+async def send_ws_controller_request(data):
     """
     Sends a JSON request via WebSocket and waits for the response.
     """
-    async with websockets.connect(WS_SERVER_URI) as websocket:
+    async with websockets.connect(WS_SERVER_CONTROLLER_URI) as websocket:
         await websocket.send(json.dumps(data))
         response = await websocket.recv()
         return json.loads(response)
     
+async def send_ws_mininet_request(data):
+    """
+    Sends a JSON request via WebSocket and waits for the response.
+    """
+    async with websockets.connect(WS_SERVER_MININET_URI) as websocket:
+        await websocket.send(json.dumps(data))
+        response = await websocket.recv()
+        return json.loads(response)
+    
+
 def run_async(coro):
     loop = asyncio.get_event_loop()
     return loop.run_until_complete(coro)
@@ -73,7 +89,7 @@ def send_websocket_allocate_request(src, dst, bandwidth=8):
         "bandwidth": bandwidth
     }
     print(f"\nSending WebSocket request: {data}")
-    response = run_async(send_ws_request(data))
+    response = run_async(send_ws_controller_request(data))
     if response.get("status") == "success":
         print("Flow reserved successfully!")
     else:
@@ -89,7 +105,7 @@ def send_websocket_delete_request(src, dst):
         "dst": dst['mac']
     }
     print(f"\nSending WebSocket request: {data}")
-    response = run_async(send_ws_request(data))
+    response = run_async(send_ws_controller_request(data))
     if response.get("status") == "success":
         print("Flow deleted successfully!")
     else:
@@ -104,7 +120,7 @@ def send_websocket_dump_flows_request(switch):
         "switch": switch
     }
     print(f"\nSending WebSocket request: {data}")
-    response = run_async(send_ws_request(data))
+    response = run_async(send_ws_controller_request(data))
     if response.get("status") == "success":
         print("Switch flow table: \n", response.get("result"))
     else:
@@ -118,27 +134,47 @@ def send_websocket_show_reservation_request():
         "command": "show_reservation"
     }
     print(f"\nSending WebSocket request: {data}")
-    response = run_async(send_ws_request(data))
+    response = run_async(send_ws_controller_request(data))
     if response.get("status") == "success":
         print("Reservation table: \n", response.get("result"))
     else:
         print(f"Error in showing Reservation table: {response.get('reason', 'Unknown error')}")
 
-# def send_websocket_ping_request(src, dst):          
-#     """
-#     Sends a WebSocket request for ping.
-#     """         
-#     data = {         
-#         "command": "ping",         
-#         "src": src, 
-#         "dst": dst       
-#     }         
-#     print(f"\nSending WebSocket request: {data}")         
-#     response = run_async(send_ws_request(data))         
-#     if response.get("status") == "success":         
-#         print("Ping result: \n", response.get("result"))         
-#     else:         
-#         print(f"Error in ping: {response.get('reason', 'Unknown error')}")
+def send_mininet_exec_command(host: str, command: str):
+    """
+    Send a WebSocket request to run a shell command on a Mininet host.
+    """
+    data = {
+        "command": "exec",
+        "host": host,
+        "cmd": command
+    }
+    # print(f"\nSending exec request to {host}: {command}")
+    response = run_async(send_ws_mininet_request(data))  # Assicurati che WS_SERVER_URI punti a porta 9876
+    if response.get("status") == "success":
+        print("Command output:\n", response.get("output"))
+    else:
+        print(f"Error executing command: {response.get('reason')}")
+
+def iperf_test():
+    """
+    Run iperf tests between predefined hosts.
+    """
+    
+    # client_hosts = ["h1", "h2", "h3"]
+    # server_hosts = ["h4", "h5", "h6"]
+    
+    # os.makedirs("tmp", exist_ok=True)  # Create the directory if it doesn't exist
+    # for host in server_hosts:
+    #     send_mininet_exec_command(host, f"iperf -s -u -i 5 > tmp/{host}_basic.txt &")
+    
+    send_mininet_exec_command("h2", f"iperf -s -u -i 5 > tmp/h2_server_slice.txt &")
+
+    # for client, server in zip(client_hosts, server_hosts):
+    #     send_mininet_exec_command(client, f"iperf -c {hosts_mac[server]['ip']} -u -b 5M -t 60 &")
+    send_mininet_exec_command("h1", f"iperf -c {hosts_mac['h2']['ip']} -u -b 6M -t 60 &")
+    send_mininet_exec_command("h3", f"iperf -c {hosts_mac['h2']['ip']} -u -b 4M -t 60 &")
+    # send_mininet_exec_command("h4", f"iperf -c {hosts_mac['h2']['ip']} -u -b 5M -t 60 &")
 
 def run_cli():
     """
@@ -150,16 +186,17 @@ def run_cli():
     print("  show     - Show flow reservation table")
     print("  delete   - Delete an existing flow")
     print("  dump     - Dump flows from a switch")
-    # print("  ping     - Ping between 2 hosts")
+    print("  ping     - Ping between 2 hosts")
     print("  exit     - Exit")
 
+    global hosts_mac
     hosts_mac = get_mininet_macs()
     if not hosts_mac:
         print("No MAC addresses found. Make sure Mininet is running.")
         return
 
     while True:
-        command = input("\nEnter command (allocate, show, delete, dump, exit): ").strip().lower()
+        command = input("\nEnter command (allocate, show, delete, dump, ping, iperf exit): ").strip().lower()
         if command == "exit":
             print("Exiting...")
             break
@@ -181,13 +218,24 @@ def run_cli():
             send_websocket_dump_flows_request(switch) 
         elif command == "show":
             send_websocket_show_reservation_request()
-        # elif command == "ping": # Debug command
-        #     src = input("Enter src host name: ")  # Example: h1
-        #     dst = input("Enter dst host name: ")  # Example: h2
-        #     send_websocket_ping_request(src, dst ) 
+        elif command == "ping":
+            src, dst = select_hosts(hosts_mac)
+            if src and dst:
+                print(f"Pinging {dst['name']} from {src['name']}...")
+                send_mininet_exec_command(src['name'], f"ping -c 2 {dst['ip']}")
+        # elif command == "exec":
+        #     host = input("Enter host (e.g. h1): ").strip()
+        #     cmd = input(f"Enter command to run on {host}: ").strip()
+        #     send_mininet_exec_command(host, cmd)
 
+        elif command == "iperf":
+            # call a function to run iperf on many predefined hosts h1 to h4 setting both the server and the client
+            iperf_test()
+            
+            
+            
         else:
-            print("Unknown command. Try 'allocate', 'show', 'delete', 'dump' or 'exit'.")
+            print("Unknown command. Try 'allocate', 'show', 'delete', 'dump', 'ping', 'iperf' or 'exit'.")
 
 def main():
     run_cli()

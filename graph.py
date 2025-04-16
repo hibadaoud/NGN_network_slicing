@@ -30,8 +30,8 @@ def parse_iperf_file(filename):
 
 
 # Read data
-t_h1_h4 = parse_iperf_file("h4_slice.txt")
-t_h2_h5 = parse_iperf_file("h5_slice.txt")
+t_h1_h4 = parse_iperf_file("tmp/h4_slice.txt")
+t_h2_h5 = parse_iperf_file("tmp/h5_slice.txt")
 # t_h3_h6 = parse_iperf_file("h6_slice.txt")
 
 print("h1-h4 Throughput:", t_h1_h4)

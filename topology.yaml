@@ -23,7 +23,7 @@ links:
   switches:
     - node1: s1
       node2: s2
-      bw: 5
+      bw: 3
     - node1: s1
       node2: s3
       bw: 7
@@ -32,10 +32,10 @@ links:
       bw: 20
     - node1: s2
       node2: s3
-      bw: 10
+      bw: 3
     - node1: s2
       node2: s4
       bw: 10
     - node1: s3
       node2: s4
-      bw: 5
+      bw: 3

@@ -1,3 +1,4 @@
+from datetime import datetime
 import yaml
 from mininet.topo import Topo
 from mininet.net import Mininet
@@ -6,6 +7,8 @@ from mininet.cli import CLI
 from mininet.log import setLogLevel
 from mininet.link import TCLink
 import json
+import asyncio
+import websockets
 
 class DynamicTopo(Topo):
     def __init__(self, topology_file):
@@ -62,6 +65,7 @@ def save_host_info(net: Mininet):
 
     for host in net.hosts:
         mac = host.MAC()
+        ip = host.IP()
         intf = host.intfList()[0]
         link = intf.link
         if link:
@@ -72,6 +76,7 @@ def save_host_info(net: Mininet):
                 "mac": mac,
                 "connected_switch": connected_switch,
                 "src_port": connected_port,
+                "ip": ip,
             }
 
     with open("/tmp/host_info.json", "w") as f:
@@ -116,9 +121,10 @@ def run_topology():
 
     # Load the topology dynamically from YAML
     # topology_file = "topology.yaml"
-    topology_file = "topology-simple.yaml"
+    topology_file = "topology.yaml"
     topo = DynamicTopo(topology_file)
 
+    global net
     # Create network with remote controller
     net = Mininet(topo=topo, link=TCLink, controller=lambda name: RemoteController(name, ip='127.0.0.1', port=6653), autoSetMacs=True, autoStaticArp=True)
 
@@ -129,6 +135,8 @@ def run_topology():
     save_host_info(net)
     
     save_switch_links_info(net)
+    
+    start_ws_server()  # 👈 avvia WebSocket server
 
     # Open the Mininet CLI
     CLI(net)
@@ -136,6 +144,62 @@ def run_topology():
     # Stop the network when CLI exits
     net.stop()
 
+def start_ws_server():
+    """
+    Starts the WebSocket server in a background thread.
+    """
+    def run():
+        asyncio.set_event_loop(asyncio.new_event_loop())
+        start_server = websockets.serve(mininet_ws_handler, "0.0.0.0", 9876)
+        asyncio.get_event_loop().run_until_complete(start_server)
+        print("Mininet WebSocket server running on ws://127.0.0.1:9876")
+        asyncio.get_event_loop().run_forever()
+
+    import threading
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+
+async def mininet_ws_handler(websocket):
+    """
+    WebSocket handler to execute shell commands on Mininet hosts.
+    Expected JSON:
+    {
+        "command": "exec",
+        "host": "h1",
+        "cmd": "ping -c 2 10.0.0.2"
+    }
+    """
+    while True:
+        try:
+            data = await websocket.recv()
+            request = json.loads(data)
+
+            if request.get("command") == "exec":
+                host_name = request.get("host")
+                cmd = request.get("cmd")
+
+                if not net or host_name not in net:
+                    await websocket.send(json.dumps({"status": "error", "reason": "Host not found"}))
+                    continue
+
+                host = net.get(host_name)
+                
+                # 📌 TIMESTAMP: momento esatto prima dell'esecuzione
+                timestamp = datetime.now().isoformat(timespec='seconds')
+                print(f"[{timestamp}] Executing on {host_name}: {cmd}")  # stampa lato server
+
+                # Esecuzione comando
+                output = host.cmd(cmd)
+
+                # Output con timestamp in testa (opzionale per il client)
+                output_with_timestamp = f"[{timestamp}] {host_name}$ {cmd}\n{output}"
+
+                await websocket.send(json.dumps({"status": "success", "output": output_with_timestamp}))
+                
+            else:
+                await websocket.send(json.dumps({"status": "error", "reason": "Unknown command"}))
+        except Exception as e:
+            await websocket.send(json.dumps({"status": "error", "reason": str(e)}))
 
 if __name__ == '__main__':
     run_topology()

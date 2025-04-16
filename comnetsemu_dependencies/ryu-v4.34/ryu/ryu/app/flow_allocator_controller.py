@@ -71,6 +71,9 @@ class FlowAllocator(app_manager.RyuApp):
         self._init_flow_capacity()
 
         self.path_finder = PathFinder(self.flow_capacity, self.logger)
+        
+        self.qos_queues = {}  # (dpid, port) -> {queue_id: bandwidth}
+        self.next_queue_id = 1  # start from 1 (0 is usually best-effort)
             
     def _init_host_to_switch(self):
         """
@@ -525,7 +528,9 @@ class FlowAllocator(app_manager.RyuApp):
                     match = parser.OFPMatch(eth_src=src_mac, eth_dst=dst_mac)
 
                #  Apply QoS queue to enforce bandwidth limitation
-                queue_id = self.setup_qos_queue(datapath, out_port, bandwidth)
+                # queue_id = self.setup_qos_queue(datapath, out_port, bandwidth)
+                
+                queue_id = self.get_or_create_queue_id(datapath.id, out_port, bandwidth)
                 actions = [parser.OFPActionSetQueue(queue_id), parser.OFPActionOutput(out_port)]
                 self.add_flow(datapath, 1, match, actions)
 
@@ -566,29 +571,64 @@ class FlowAllocator(app_manager.RyuApp):
 
         self.logger.info(f"Flow rules deleted along path: {path}")
     
-    def setup_qos_queue(self, datapath, port, bandwidth):
-        """
-        Sets up a QoS queue to enforce bandwidth limits.
-        Args:
-            datapath: OpenFlow switch datapath.
-            port: The port number to apply the QoS queue.
-            bandwidth: Bandwidth limit in Mbps.
-        Returns:
-            The queue ID.
-        """
-        queue_id = 1  # We assume only one queue per port
+    # def setup_qos_queue(self, datapath, port, bandwidth):
+    #     """
+    #     Sets up a QoS queue to enforce bandwidth limits.
+    #     Args:
+    #         datapath: OpenFlow switch datapath.
+    #         port: The port number to apply the QoS queue.
+    #         bandwidth: Bandwidth limit in Mbps.
+    #     Returns:
+    #         The queue ID.
+    #     """
+    #     queue_id = 1  # We assume only one queue per port
 
-        ovs_cmd = f"sudo ovs-vsctl -- set Port s{datapath.id}-eth{port} qos=@newqos -- \
-            --id=@newqos create QoS type=linux-htb other-config:max-rate={bandwidth * 1000000} \
-            queues=0=@q0 -- --id=@q0 create Queue other-config:min-rate={bandwidth * 1000000} \
-            other-config:max-rate={bandwidth * 1000000}"
+    #     ovs_cmd = f"sudo ovs-vsctl -- set Port s{datapath.id}-eth{port} qos=@newqos -- \
+    #         --id=@newqos create QoS type=linux-htb other-config:max-rate={bandwidth * 1000000} \
+    #         queues=0=@q0 -- --id=@q0 create Queue other-config:min-rate={bandwidth * 1000000} \
+    #         other-config:max-rate={bandwidth * 1000000}"
 
-        os.system(ovs_cmd)  # Run the OVS command
+    #     os.system(ovs_cmd)  # Run the OVS command
 
-        self.logger.info(f"QoS Queue {queue_id} set on switch {datapath.id} port {port} with {bandwidth} Mbps")
+    #     self.logger.info(f"QoS Queue {queue_id} set on switch {datapath.id} port {port} with {bandwidth} Mbps")
+
+    #     return queue_id
+    
+    def get_or_create_queue_id(self, dpid, port, bandwidth):
+        key = (dpid, port)
+        if key not in self.qos_queues:
+            self.qos_queues[key] = {}
+
+        # Check if this bandwidth already has a queue
+        for qid, bw in self.qos_queues[key].items():
+            if bw == bandwidth:
+                return qid
+
+        # Else create a new queue
+        queue_id = self.next_queue_id
+        self.qos_queues[key][queue_id] = bandwidth
+        self.next_queue_id += 1
+
+        # Generate queue config string
+        queue_configs = []
+        for qid, bw in self.qos_queues[key].items():
+            queue_configs.append(f"{qid}=@q{qid}")
+
+        # Generate queue creation string
+        create_queues = " ".join([
+            f"-- --id=@q{qid} create Queue other-config:min-rate={bw * 1000000} other-config:max-rate={bw * 1000000}"
+            for qid, bw in self.qos_queues[key].items()
+        ])
+
+        # Full command
+        ovs_cmd = f"sudo ovs-vsctl -- set Port s{dpid}-eth{port} qos=@newqos -- " \
+                f"--id=@newqos create QoS type=linux-htb other-config:max-rate=100000000 queues={' '.join(queue_configs)} {create_queues}"
+
+        os.system(ovs_cmd)
+        self.logger.info(f"Configured QoS on s{dpid}-eth{port} with queues: {self.qos_queues[key]}")
 
         return queue_id
-    
+        
     def get_datapath(self, switch_id):
         """
         Maps a switch ID to its datapath object.
