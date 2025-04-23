@@ -1,3 +1,4 @@
+from datetime import datetime
 import matplotlib.pyplot as plt
 import re
 
@@ -30,38 +31,45 @@ def parse_iperf_file(filename):
 
 
 # Read data
-t_h1_h4 = parse_iperf_file("tmp/h4_slice.txt")
-t_h2_h5 = parse_iperf_file("tmp/h5_slice.txt")
-# t_h3_h6 = parse_iperf_file("h6_slice.txt")
+t_h1_h2 = parse_iperf_file("netbench/h2_server_basic.txt")
+t_h4_h3 = parse_iperf_file("netbench/h3_server_basic.txt")
+t_h6_h5 = parse_iperf_file("netbench/h5_server_basic.txt")
 
-print("h1-h4 Throughput:", t_h1_h4)
-print("h2-h5 Throughput:", t_h2_h5)
-# print("h3-h6 Throughput:", t_h3_h6)
+print("h1-h2 Throughput:", t_h1_h2)
+print("h4-h3 Throughput:", t_h4_h3)
+print("h6-h5 Throughput:", t_h6_h5)
 
 
 # Time axis: assuming 5-second intervals
-x = [i * 5 for i in range(len(t_h1_h4))]
+x = [i * 5 for i in range(len(t_h1_h2))]
 
 # --- Plot throughput ---
 plt.figure(figsize=(10, 6))
-plt.plot(x, t_h1_h4, color='g', label="h1 → h4 (5M requested)", marker="o")
-plt.plot(x, t_h2_h5, color='b', label="h2 → h5 (5M requested)", marker="s")
-# plt.plot(x, t_h3_h6, color='orange', label="h3 → h6 (4M requested)", marker="^")
+plt.plot(x, t_h1_h2, color='g', label="h1 → h2 (6M requested)", marker="o")
+plt.plot(x, t_h4_h3, color='b', label="h4 → h3 (4M requested)", marker="s")
+plt.plot(x, t_h6_h5, color='orange', label="h6 → h5 (2M requested)", marker="^")
 
 # Plot total throughput
-total_throughput = [sum(values) for values in zip(t_h1_h4, t_h2_h5)]
+total_throughput = [sum(values) for values in zip(t_h1_h2, t_h4_h3)]
 plt.plot(x, total_throughput, label="Total Throughput", color='black')
 
 # Reference lines
 plt.axhline(y=10, color='black', linestyle='--', label="Link Capacity (10M)")
-plt.axhline(y=5, color='g', linestyle='--', label="Requested BW h1-h4 (5M)")
-plt.axhline(y=5, color='b', linestyle='--', label="Requested BW h2-h5 (5M)")
-# plt.axhline(y=4, color='orange', linestyle='--', label="Requested BW h3-h6 (4M)")
+plt.axhline(y=6, color='g', linestyle='--', label="Requested BW h1-h2 (6M)")
+plt.axhline(y=4, color='b', linestyle='--', label="Requested BW h4-h3 (4M)")
+plt.axhline(y=2, color='orange', linestyle='--', label="Requested BW h6-h5 (2M)")
 
-plt.title("UDP Throughput Over Time (Congested Link with Slicing)")
+plt.title("UDP Throughput Over Time (Congested Link without Slicing)")
 plt.xlabel("Time (s)")
 plt.ylabel("Throughput (Mbps)")
 plt.legend()
 plt.grid(True)
 plt.tight_layout()
+
+# Salva il grafico con timestamp
+timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+filename = f"netbench/throughput_plot_basic_{timestamp}.png"
+plt.savefig(filename)
+
 plt.show()
+print(f"Plot saved as {filename}")

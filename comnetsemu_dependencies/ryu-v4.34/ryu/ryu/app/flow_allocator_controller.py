@@ -301,7 +301,6 @@ class FlowAllocator(app_manager.RyuApp):
             }
     
     # 1. Endpoint for flow allocation
-
     def allocate_flow(self, src_mac, dst_mac, bandwidth):
         """
         Reserves network flow between two hosts with specified bandwidth requirements.
@@ -433,7 +432,6 @@ class FlowAllocator(app_manager.RyuApp):
         except Exception as e:
             print(f"Error in show_reservation: {str(e)}")
             return {}
-
         
     def check_reservation(self, src_mac, dst_mac):
         """
@@ -571,64 +569,43 @@ class FlowAllocator(app_manager.RyuApp):
 
         self.logger.info(f"Flow rules deleted along path: {path}")
     
-    # def setup_qos_queue(self, datapath, port, bandwidth):
-    #     """
-    #     Sets up a QoS queue to enforce bandwidth limits.
-    #     Args:
-    #         datapath: OpenFlow switch datapath.
-    #         port: The port number to apply the QoS queue.
-    #         bandwidth: Bandwidth limit in Mbps.
-    #     Returns:
-    #         The queue ID.
-    #     """
-    #     queue_id = 1  # We assume only one queue per port
-
-    #     ovs_cmd = f"sudo ovs-vsctl -- set Port s{datapath.id}-eth{port} qos=@newqos -- \
-    #         --id=@newqos create QoS type=linux-htb other-config:max-rate={bandwidth * 1000000} \
-    #         queues=0=@q0 -- --id=@q0 create Queue other-config:min-rate={bandwidth * 1000000} \
-    #         other-config:max-rate={bandwidth * 1000000}"
-
-    #     os.system(ovs_cmd)  # Run the OVS command
-
-    #     self.logger.info(f"QoS Queue {queue_id} set on switch {datapath.id} port {port} with {bandwidth} Mbps")
-
-    #     return queue_id
-    
     def get_or_create_queue_id(self, dpid, port, bandwidth):
         key = (dpid, port)
+        
+        # Initialize queues on this port if not already done
         if key not in self.qos_queues:
             self.qos_queues[key] = {}
-
-        # Check if this bandwidth already has a queue
+        
+        # Return existing queue ID if the bandwidth already exists
         for qid, bw in self.qos_queues[key].items():
             if bw == bandwidth:
                 return qid
 
-        # Else create a new queue
-        queue_id = self.next_queue_id
+        # Otherwise, create a new queue ID (per-port)
+        queue_id = max(self.qos_queues[key].keys(), default=0) + 1
         self.qos_queues[key][queue_id] = bandwidth
-        self.next_queue_id += 1
 
-        # Generate queue config string
-        queue_configs = []
-        for qid, bw in self.qos_queues[key].items():
-            queue_configs.append(f"{qid}=@q{qid}")
-
-        # Generate queue creation string
-        create_queues = " ".join([
-            f"-- --id=@q{qid} create Queue other-config:min-rate={bw * 1000000} other-config:max-rate={bw * 1000000}"
+        # --- Build the full queue mapping for this port ---
+        queue_refs = ",".join([f"{qid}=@q{qid}" for qid in self.qos_queues[key]])
+        
+        # --- Build the queue creation commands ---
+        queue_creations = " ".join([
+            f"-- --id=@q{qid} create Queue other-config:min-rate={bw * 1000000} other-config:max-rate={bw * 1000000} "
             for qid, bw in self.qos_queues[key].items()
         ])
 
-        # Full command
-        ovs_cmd = f"sudo ovs-vsctl -- set Port s{dpid}-eth{port} qos=@newqos -- " \
-                f"--id=@newqos create QoS type=linux-htb other-config:max-rate=100000000 queues={' '.join(queue_configs)} {create_queues}"
+        # Full OVS command: recreate QoS config with all queues attached
+        ovs_cmd = (
+            f"sudo ovs-vsctl -- set Port s{dpid}-eth{port} qos=@newqos "
+            f"-- --id=@newqos create QoS type=linux-htb other-config:max-rate=1000000"
+            f"queues={{{queue_refs}}} {queue_creations}"
+        )
 
+        self.logger.info(f"Creating/updating QoS on s{dpid}-eth{port} with queue {queue_id} ({bandwidth} Mbps)")
         os.system(ovs_cmd)
-        self.logger.info(f"Configured QoS on s{dpid}-eth{port} with queues: {self.qos_queues[key]}")
 
         return queue_id
-        
+ 
     def get_datapath(self, switch_id):
         """
         Maps a switch ID to its datapath object.

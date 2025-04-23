@@ -3,6 +3,8 @@ hosts:
   h2:
   h3:
   h4:
+  h5:
+  h6:
 
 switches:
   s1:
@@ -20,22 +22,26 @@ links:
       node2: s3
     - node1: h4
       node2: s4
+    - node1: h5
+      node2: s2
+    - node1: h6
+      node2: s4
   switches:
     - node1: s1
       node2: s2
       bw: 3
     - node1: s1
       node2: s3
-      bw: 7
+      bw: 3
     - node1: s1
       node2: s4
-      bw: 20
+      bw: 12
     - node1: s2
       node2: s3
-      bw: 3
+      bw: 5
     - node1: s2
       node2: s4
-      bw: 10
+      bw: 11
     - node1: s3
       node2: s4
       bw: 3

@@ -1,14 +1,17 @@
 from datetime import datetime
-import yaml
 from mininet.topo import Topo
 from mininet.net import Mininet
 from mininet.node import RemoteController, OVSKernelSwitch
 from mininet.cli import CLI
 from mininet.log import setLogLevel
 from mininet.link import TCLink
+import os
+import yaml
 import json
 import asyncio
 import websockets
+import subprocess
+
 
 class DynamicTopo(Topo):
     def __init__(self, topology_file):
@@ -115,14 +118,21 @@ def save_switch_links_info(net: Mininet):
 
     print("Switch links info saved to /tmp/switch_links_info.json")
 
+def clean_ovs_qos():
+    print("Cleaning global QoS and Queue objects...")
+    os.system("sudo ovs-vsctl --all destroy QoS")
+    os.system("sudo ovs-vsctl --all destroy Queue")
+
 def run_topology():
     # Set log level
     setLogLevel('info')
 
     # Load the topology dynamically from YAML
-    # topology_file = "topology.yaml"
     topology_file = "topology.yaml"
+    # topology_file = "topology_try.yaml"
     topo = DynamicTopo(topology_file)
+    
+    clean_ovs_qos()  # Clean up any existing QoS and Queue objects
 
     global net
     # Create network with remote controller
@@ -161,13 +171,8 @@ def start_ws_server():
 
 async def mininet_ws_handler(websocket):
     """
-    WebSocket handler to execute shell commands on Mininet hosts.
-    Expected JSON:
-    {
-        "command": "exec",
-        "host": "h1",
-        "cmd": "ping -c 2 10.0.0.2"
-    }
+    WebSocket handler to execute shell commands on Mininet hosts using non-blocking popen.
+    Sends output incrementally to the client.
     """
     while True:
         try:
@@ -177,29 +182,48 @@ async def mininet_ws_handler(websocket):
             if request.get("command") == "exec":
                 host_name = request.get("host")
                 cmd = request.get("cmd")
+                no_output = request.get("no_output", False)
 
                 if not net or host_name not in net:
                     await websocket.send(json.dumps({"status": "error", "reason": "Host not found"}))
                     continue
 
                 host = net.get(host_name)
-                
-                # 📌 TIMESTAMP: momento esatto prima dell'esecuzione
                 timestamp = datetime.now().isoformat(timespec='seconds')
-                print(f"[{timestamp}] Executing on {host_name}: {cmd}")  # stampa lato server
-
-                # Esecuzione comando
-                output = host.cmd(cmd)
-
-                # Output con timestamp in testa (opzionale per il client)
-                output_with_timestamp = f"[{timestamp}] {host_name}$ {cmd}\n{output}"
-
-                await websocket.send(json.dumps({"status": "success", "output": output_with_timestamp}))
+                print(f"[{timestamp}] Executing on {host_name}: {cmd}")
                 
+                if no_output:
+                    host.popen(cmd, shell=True)
+                    await websocket.send(json.dumps({
+                        "status": "done",
+                        "output": f"[{timestamp}] {host_name}$ {cmd} (launched without waiting)"
+                    }))
+                    return
+                
+                process = host.popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=True, universal_newlines=True)
+
+                # Legge l'output riga per riga e lo manda in streaming al client
+                for line in iter(process.stdout.readline, ''):
+                    if line:
+                        await websocket.send(json.dumps({
+                            "status": "stream",
+                            "output": line.strip()
+                        }))
+                process.stdout.close()
+                process.wait()
+
+                await websocket.send(json.dumps({
+                    "status": "done",
+                    "output": f"[{timestamp}] {host_name}$ {cmd}"
+                }))
+
             else:
                 await websocket.send(json.dumps({"status": "error", "reason": "Unknown command"}))
         except Exception as e:
-            await websocket.send(json.dumps({"status": "error", "reason": str(e)}))
+            if not websocket.closed:
+                await websocket.send(json.dumps({"status": "error", "reason": str(e)}))
+        await asyncio.sleep(0.01)  # Prevents busy waiting
+
 
 if __name__ == '__main__':
     run_topology()
