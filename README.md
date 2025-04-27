@@ -156,5 +156,9 @@ The CLI provides the following commands:
 - Ensure Mininet and the Ryu controller are running before testing.
 - Open at least 3 terminal sessions for running the topology, controller, and CLI.
 - Clean up QoS configurations using the `clean_ovs_qos()` function in **topology.py** if needed.
+- If everything seems broken or your topology crashed, then just run a cleanup and you will be safe :smile: :
+  ```bash
+  sudo mn -c
+  ```
 
 All set! :smile:
