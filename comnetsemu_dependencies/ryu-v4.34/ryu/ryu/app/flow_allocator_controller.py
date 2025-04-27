@@ -14,6 +14,8 @@ from flow_allocator_handler_websocket import FlowWebSocketHandler
 from path_finder import PathFinder
 import time
 
+RESERVATION_EXPIRE_TIME = 60  # seconds
+
 class FlowAllocator(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
     _CONTEXTS = {'wsgi': WSGIApplication}
@@ -57,7 +59,6 @@ class FlowAllocator(app_manager.RyuApp):
         threading.Thread(target=self.websocket_handler.start, daemon=True).start()
         self.logger.info("WebSocket handler started!")
         
-        
         self.host_to_switch = {}
         self._init_host_to_switch()
         
@@ -72,6 +73,9 @@ class FlowAllocator(app_manager.RyuApp):
 
         self.path_finder = PathFinder(self.flow_capacity, self.logger)
         
+        # start a thread to periodically check for expired reservations
+        threading.Thread(target=self._check_reservation_expiry, daemon=True).start()
+                
         self.qos_queues = {}  # (dpid, port) -> {queue_id: bandwidth}
         self.next_queue_id = 1  # start from 1 (0 is usually best-effort)
             
@@ -362,7 +366,8 @@ class FlowAllocator(app_manager.RyuApp):
         self.flow_reservations[(src_mac, dst_mac)] = {
             "path": path,
             "bandwidth": bandwidth,
-            "start_time": time.time()
+            "start_time": time.time(),
+            "installed": False
         }
         self.logger.info(f"Flow reservation added: {src_mac} -> {dst_mac}")
         return True
@@ -418,13 +423,15 @@ class FlowAllocator(app_manager.RyuApp):
                 path = reservation["path"]
                 bandwidth = reservation["bandwidth"]
                 start_time = reservation["start_time"]
+                installed = reservation["installed"]
                 elapsed = time.time() - start_time
 
                 reservations[f"{src_mac}->{dst_mac}"] = {
                     "path": path,
                     "bandwidth": bandwidth,
                     "elapsed_time": f"{elapsed:.2f}",
-                    "start_time": start_time
+                    "start_time": start_time,
+                    "installed": installed
                 }
             
             print(f"Reservations: {reservations}")  # Log the reservations
@@ -432,7 +439,40 @@ class FlowAllocator(app_manager.RyuApp):
         except Exception as e:
             print(f"Error in show_reservation: {str(e)}")
             return {}
-        
+    
+    def _check_reservation_expiry(self):
+        """
+        Periodically checks for expired flow reservations and restores network capacity.
+        This function runs in a separate thread and checks the flow_reservations dictionary
+        for any reservations that have exceeded their expiration time (RESERVATION_EXPIRE_TIME seconds).
+        If an expired reservation is found, it restores the network capacity and deletes the reservation.
+        """
+        while True:
+            time.sleep(10)
+            current_time = time.time()
+            expired_reservations = []
+            for (src_mac, dst_mac), reservation in list(self.flow_reservations.items()):
+                elapsed_time = current_time - reservation["start_time"]
+                
+                if not reservation["installed"] and elapsed_time > RESERVATION_EXPIRE_TIME:
+                    self.logger.info(f"Flow reservation expired: {src_mac} -> {dst_mac}")
+                    expired_reservations.append((src_mac, dst_mac))
+                    path = reservation["path"]
+                    bandwidth = reservation["bandwidth"]
+                    
+                    # Restore the flow capacity
+                    for i in range(len(path) - 1):
+                        link = (path[i], path[i + 1])
+                        reverse_link = (path[i + 1], path[i])
+                        self.flow_capacity[link] += bandwidth
+                        self.flow_capacity[reverse_link] += bandwidth
+                        self.path_finder.link_capacities[link] = self.flow_capacity[link]
+                        self.path_finder.link_capacities[reverse_link] = self.flow_capacity[reverse_link]
+                    
+                    self.path_finder.build_graph()  # Rebuild the graph
+                    self.logger.info(f"Flow capacity restored for {src_mac} -> {dst_mac}.")    
+                    self.flow_reservations.pop((src_mac, dst_mac))
+                    
     def check_reservation(self, src_mac, dst_mac):
         """
         Validates a flow reservation and allocates the correspanded flow between between two hosts.
@@ -456,7 +496,7 @@ class FlowAllocator(app_manager.RyuApp):
         elapsed_time = current_time - start_time
 
         # Check if the reservation has expired
-        if elapsed_time > 180:
+        if elapsed_time > RESERVATION_EXPIRE_TIME:
             self.logger.error(f"Flow reservation expired: {src_mac} -> {dst_mac}")
             for i in range(len(path) - 1):
                 link = (path[i], path[i + 1])
@@ -491,6 +531,8 @@ class FlowAllocator(app_manager.RyuApp):
         self.install_path_flows(path[::-1], dst_mac, src_mac, dst_port, src_port, bandwidth)
         
         self.logger.info(f"Flow successfully allocated from {src_mac} to {dst_mac}.")
+        
+        self.flow_reservations[(src_mac, dst_mac)]["installed"] = True
 
         return True
 
@@ -659,26 +701,8 @@ class FlowAllocator(app_manager.RyuApp):
                 datapath=dp, buffer_id=msg.buffer_id, in_port=in_port, actions=actions, data=msg.data
             )
             dp.send_msg(out)
-        
-        if dst_mac in self.host_to_switch:
-            out_port = self.host_to_switch[dst_mac].get("src_port")
-            if out_port is None:
-                self.logger.error(f"Source port not found for host with MAC {dst_mac}")
-                return
-            self.logger.info(f"Forwarding packet from {src_mac} to {dst_mac} via Port {out_port}")
         else:
-            self.logger.info(f"Host not found: {dst_mac}")
+            self.logger.info(f"No flow rules installed, dropping packet from {src_mac} to {dst_mac}.")
+            # Drop the packet if no flow rules are installed
             return
-
-        # Defines the actions for the packet
-        actions = [parser.OFPActionOutput(out_port)]
-
-        # # Send the packet to the destination or flood
-        payload = b"Forwarded from controller"
-        data = msg.data + payload if msg.buffer_id == ofproto.OFP_NO_BUFFER else None
-        
-        out = parser.OFPPacketOut(
-            datapath=dp, buffer_id=msg.buffer_id, in_port=in_port, actions=actions, data=data
-        )
-        dp.send_msg(out)
         

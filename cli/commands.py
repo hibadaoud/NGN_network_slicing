@@ -53,20 +53,6 @@ async def send_ws_controller_request(data):
         response = await websocket.recv()
         return json.loads(response)
 
-async def send_ws_mininet_request(data):
-    async with websockets.connect(WS_SERVER_MININET_URI) as websocket:
-        await websocket.send(json.dumps(data))
-        response = await websocket.recv()
-        return json.loads(response)
-
-# def send_mininet_exec_command(host, command):
-#     data = {"command": "exec", "host": host, "cmd": command}
-#     response = run_async(send_ws_mininet_request(data))
-#     if response.get("status") == "success":
-#         print("Command output:\n", response.get("output"))
-#     else:
-#         print(f"Error executing command: {response.get('reason')}")
-
 def send_mininet_exec_command(host, command, no_output=False):
     async def _send_and_stream():
         try: 
@@ -101,7 +87,6 @@ def send_mininet_exec_command(host, command, no_output=False):
         finally:
             await asyncio.sleep(0.1)
     run_async(_send_and_stream())
-
 
 def send_websocket_allocate_request(src, dst, bandwidth=8):
     data = {"command": "allocate_flow", "src": src['mac'], "dst": dst['mac'], "bandwidth": bandwidth}
@@ -156,7 +141,12 @@ def handle_delete(hosts_mac):
 
 def handle_dump(hosts_mac):
     switch = input("Enter switch name: ")
-    send_websocket_dump_flows_request(switch)
+    try:
+        import subprocess
+        dump = subprocess.check_output(["sudo", "ovs-ofctl", "-O", "OpenFlow13", "dump-flows", switch])
+        print("Switch flow table: \n", dump.decode("utf-8"))
+    except Exception as e:
+        print(f"Error dumping flows: {e}")
 
 def handle_ping(hosts_mac):
     src, dst = select_hosts(hosts_mac)
@@ -174,13 +164,13 @@ def show_progress(duration):
 def show_progress_with_cpu(duration):
     print("\nRunning iperf test with system monitoring:\n")
     for i in range(duration):
-        cpu = psutil.cpu_percent(interval=0.9)  # leggermente inferiore a 1s
+        cpu = psutil.cpu_percent(interval=0.9)
         sys.stdout.write(f"\r[{i + 1}/{duration}] sec | CPU Usage: {cpu:.1f}%   ")
         sys.stdout.flush()
     print("\nTest completed. Generating plot...\n")
 
 def generate_plot():
-    # se il test è in slicing chiamo uno script altrimenti un altro
+    # Call one script if the test is in slicing mode, otherwise call a different script
     if TEST_MODE == "slicing":
         os.system("python3 graph_mesh_slice.py")
     elif TEST_MODE == "basic":
