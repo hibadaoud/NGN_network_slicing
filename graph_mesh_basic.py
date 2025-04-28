@@ -47,17 +47,17 @@ x = [i * 5 for i in range(len(t_h1_h2))]
 plt.figure(figsize=(10, 6))
 plt.plot(x, t_h1_h2, color='g', label="h1 → h2 (6M requested)", marker="o")
 plt.plot(x, t_h4_h3, color='b', label="h4 → h3 (4M requested)", marker="s")
-plt.plot(x, t_h6_h5, color='orange', label="h6 → h5 (2M requested)", marker="^")
+plt.plot(x, t_h6_h5, color='orange', label="h6 → h5 (4M requested)", marker="^")
 
 # Plot total throughput
-total_throughput = [sum(values) for values in zip(t_h1_h2, t_h4_h3)]
+total_throughput = [sum(values) for values in zip(t_h1_h2, t_h4_h3, t_h6_h5)]
 plt.plot(x, total_throughput, label="Total Throughput", color='black')
 
 # Reference lines
 plt.axhline(y=10, color='black', linestyle='--', label="Link Capacity (10M)")
 plt.axhline(y=6, color='g', linestyle='--', label="Requested BW h1-h2 (6M)")
 plt.axhline(y=4, color='b', linestyle='--', label="Requested BW h4-h3 (4M)")
-plt.axhline(y=2, color='orange', linestyle='--', label="Requested BW h6-h5 (2M)")
+plt.axhline(y=2, color='orange', linestyle='--', label="Requested BW h6-h5 (4M)")
 
 plt.title("UDP Throughput Over Time (Congested Link without Slicing)")
 plt.xlabel("Time (s)")

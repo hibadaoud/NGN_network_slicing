@@ -190,7 +190,7 @@ def iperf_test(hosts_mac):
 def iperf_test_slice(hosts_mac):
     os.makedirs("netbench", exist_ok=True)
     
-    test_duration = 60
+    test_duration = 120
     sample_interval = 5
     
     # kill any existing iperf processes
@@ -217,10 +217,10 @@ def iperf_test_basic(hosts_mac):
     
     send_mininet_exec_command("h2", f"iperf -u -s -b 6M -i {sample_interval} > netbench/h2_server_basic.txt", no_output=True)
     send_mininet_exec_command("h3", f"iperf -u -s -b 4M -i {sample_interval} > netbench/h3_server_basic.txt", no_output=True)
-    send_mininet_exec_command("h5", f"iperf -u -s -b 2M -i {sample_interval} > netbench/h5_server_basic.txt", no_output=True)
+    send_mininet_exec_command("h5", f"iperf -u -s -b 4M -i {sample_interval} > netbench/h5_server_basic.txt", no_output=True)
     send_mininet_exec_command("h1", f"iperf -c {hosts_mac['h2']['ip']} -u -b 6M -t {test_duration}", no_output=True)
     send_mininet_exec_command("h4", f"iperf -c {hosts_mac['h3']['ip']} -u -b 4M -t {test_duration}", no_output=True)
-    send_mininet_exec_command("h6", f"iperf -c {hosts_mac['h5']['ip']} -u -b 2M -t {test_duration}", no_output=True)
+    send_mininet_exec_command("h6", f"iperf -c {hosts_mac['h5']['ip']} -u -b 4M -t {test_duration}", no_output=True)
     show_progress(test_duration + 5)
     generate_plot()
 
